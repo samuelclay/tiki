@@ -12,7 +12,7 @@
 //   NEO_GRB     Pixels are wired for GRB bitstream (most NeoPixel products)
 //   NEO_RGB     Pixels are wired for RGB bitstream (v1 FLORA pixels, not v2)
 //   NEO_RGBW    Pixels are wired for RGBW bitstream (NeoPixel RGBW products)
-seesaw_NeoPixel strip = seesaw_NeoPixel(12, PIN, NEO_GRB + NEO_KHZ800);
+seesaw_NeoPixel strip = seesaw_NeoPixel(36, PIN, NEO_GRB + NEO_KHZ800);
 
 // IMPORTANT: To reduce NeoPixel burnout risk, add 1000 uF capacitor across
 // pixel power leads, add 300 - 500 Ohm resistor on first pixel's data input
@@ -22,7 +22,7 @@ seesaw_NeoPixel strip = seesaw_NeoPixel(12, PIN, NEO_GRB + NEO_KHZ800);
 void setup() {
   Serial.begin(115200);
   
-  while (!Serial) delay(10);   // wait until serial port is opened
+  // while (!Serial) delay(10);   // wait until serial port is opened
   
   if(!strip.begin(0x60)){
     Serial.println("seesaw not found!");
