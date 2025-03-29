@@ -148,31 +148,47 @@ void loop() {
   
   // Update the base color offset smoothly if needed
   if (baseColorOffset != targetColorOffset) {
-    // Gradually move towards target (1 step every 80ms - significantly slower than before)
+    // Gradually move towards target (faster when rotating encoder)
     static uint32_t lastColorTransition = 0;
-    if (currentMillis - lastColorTransition >= 80) {  // Was 30ms, now 80ms
-      // Only move 1 step at a time, but less frequently
+    
+    // Calculate distance between current and target
+    int distance = abs(targetColorOffset - baseColorOffset);
+    if (distance > 128) {
+      // If we need to go more than halfway around the wheel, use the shorter path
+      distance = 256 - distance;
+    }
+    
+    // Use variable speed based on distance - faster when further from target
+    int transitionDelay = 25; // Much faster than before (was 80ms)
+    
+    if (currentMillis - lastColorTransition >= transitionDelay) {
+      // Step size also varies with distance
+      int stepSize = 1;
+      if (distance > 60) stepSize = 3; // Faster movement when far away
+      else if (distance > 30) stepSize = 2;
+      
+      // Make the move using shortest path
       if (baseColorOffset < targetColorOffset) {
         if (targetColorOffset - baseColorOffset > 128) {
-          // If target is more than halfway around the color wheel in positive direction,
-          // it's faster to go backward
-          baseColorOffset--;
+          // Go backward (shorter)
+          baseColorOffset = (baseColorOffset - stepSize) % 256;
         } else {
-          baseColorOffset++;
+          // Go forward
+          baseColorOffset = (baseColorOffset + stepSize) % 256;
         }
       } else if (baseColorOffset > targetColorOffset) {
         if (baseColorOffset - targetColorOffset > 128) {
-          // If target is more than halfway around the color wheel in negative direction,
-          // it's faster to go forward
-          baseColorOffset++;
+          // Go forward (shorter)
+          baseColorOffset = (baseColorOffset + stepSize) % 256;
         } else {
-          baseColorOffset--;
+          // Go backward
+          baseColorOffset = (baseColorOffset - stepSize) % 256;
         }
       }
       
       // Wrap around color wheel
       if (baseColorOffset >= 256) baseColorOffset = 0;
-      if (baseColorOffset < 0) baseColorOffset = 255;
+      if (baseColorOffset < 0) baseColorOffset += 256;
       
       lastColorTransition = currentMillis;
     }
