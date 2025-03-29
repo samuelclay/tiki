@@ -3,6 +3,8 @@
 
 #include <Adafruit_seesaw.h>
 #include <seesaw_neopixel.h>
+#include <esp_now.h>
+#include <WiFi.h>
 
 // NeoPixel configuration
 #define PIN 15
@@ -29,6 +31,21 @@
 // Define patterns
 #define NUM_PATTERNS 5
 
+// ESP-Now broadcast configuration
+uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // Broadcast to all ESP devices
+#define SYNC_INTERVAL 1000 // Sync every second
+
+// Data structure for ESP-Now synchronization
+typedef struct sync_message {
+  uint32_t timestamp;    // Seconds since boot
+  uint8_t pattern;       // Current pattern number
+  uint8_t brightness;    // Current brightness
+  uint8_t colorOffset;   // Current color offset
+} sync_message;
+
+// Create a sync structure for sending and receiving data
+sync_message syncData;
+
 seesaw_NeoPixel strip =
     seesaw_NeoPixel(TOTAL_PIXELS, PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_seesaw ano = Adafruit_seesaw();
@@ -50,11 +67,93 @@ bool isBlinking = false; // Currently in a blink animation
 uint8_t blinkState = 0; // State of the blink animation
 bool anoAvailable = false;
 
+// ESP-Now synchronization variables
+uint32_t lastSyncTime = 0;
+uint32_t bootTime = 0;
+uint32_t lastChangeTime = 0; // Track when last change happened
+bool syncPending = false;
+bool fastSyncMode = false; // Track if we're in fast sync mode
+
+// Callback when data is sent
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("Last Packet Send Status: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
+
+// Callback when data is received
+void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
+  sync_message *incomingSync = (sync_message *)incomingData;
+  Serial.print("Received sync: Time=");
+  Serial.print(incomingSync->timestamp);
+  Serial.print(", Pattern=");
+  Serial.print(incomingSync->pattern);
+  Serial.print(", Brightness=");
+  Serial.print(incomingSync->brightness);
+  Serial.print(", ColorOffset=");
+  Serial.println(incomingSync->colorOffset);
+  
+  // Compare received timestamp with local time
+  uint32_t localTimestamp = (millis() - bootTime) / 1000;
+  
+  // If received timestamp is ahead of ours, adopt their settings
+  if (incomingSync->timestamp > localTimestamp) {
+    Serial.println("Adopting received settings (newer timestamp)");
+    // Set sync flag to true so we won't broadcast immediately
+    syncPending = true;
+    
+    // Update our local timestamp to match received one
+    // Add a small millisecond offset to account for transmission delay
+    bootTime = millis() - (incomingSync->timestamp * 1000 + 50);
+    
+    bool stateChanged = false;
+    
+    // Update pattern
+    if (currentPattern != incomingSync->pattern) {
+      currentPattern = incomingSync->pattern;
+      animationStep = 0;
+      lastPatternChange = millis();
+      stateChanged = true;
+    }
+    
+    // Update brightness
+    if (brightness != incomingSync->brightness) {
+      brightness = incomingSync->brightness;
+      strip.setBrightness(brightness);
+      stateChanged = true;
+    }
+    
+    // Update color offset - immediately set both base and target to received value
+    if (colorPosition != incomingSync->colorOffset) {
+      Serial.print("Updating color from ");
+      Serial.print(colorPosition);
+      Serial.print(" to ");
+      Serial.println(incomingSync->colorOffset);
+      
+      // Set both base and target color to the exact same value to avoid transition
+      baseColorOffset = incomingSync->colorOffset;
+      targetColorOffset = incomingSync->colorOffset;
+      colorPosition = incomingSync->colorOffset;
+      useCustomColor = true;
+      stateChanged = true;
+    }
+    
+    // If state changed, enter fast sync mode
+    if (stateChanged) {
+      lastChangeTime = millis();
+      fastSyncMode = true;
+      Serial.println("Entering fast sync mode");
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000); // Give serial a moment to initialize
 
   Serial.println("Starting tiki LED sculpture");
+  
+  // Set boot time
+  bootTime = millis();
 
   // Initialize NeoPixels first
   Serial.println("Initializing NeoPixel seesaw...");
@@ -124,11 +223,109 @@ void setup() {
   lastPatternChange = millis();
   lastUpdate = millis();
 
+  // Initialize ESP-Now
+  WiFi.mode(WIFI_STA);
+  
+  // Get MAC for debugging
+  Serial.print("ESP32 MAC Address: ");
+  Serial.println(WiFi.macAddress());
+
+  // Initialize ESP-Now
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-Now");
+    return;
+  }
+  
+  // Register the send callback
+  esp_now_register_send_cb(OnDataSent);
+  
+  // Register peer (broadcast address)
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+  
+  // Add peer        
+  if (esp_now_add_peer(&peerInfo) != ESP_OK){
+    Serial.println("Failed to add peer");
+    return;
+  }
+  
+  // Register for a callback function that will be called when data is received
+  esp_now_register_recv_cb(OnDataRecv);
+  
+  Serial.println("ESP-Now initialized and ready");
+
   Serial.println("Setup complete - starting animation");
+}
+
+// Function to broadcast the current state to all other tikis
+void broadcastSync() {
+  // Calculate seconds since boot
+  syncData.timestamp = (millis() - bootTime) / 1000;
+  syncData.pattern = currentPattern;
+  syncData.brightness = brightness;
+  
+  // Send the colorPosition/targetOffset rather than baseColorOffset
+  // This ensures we sync to the target color immediately
+  syncData.colorOffset = useCustomColor ? colorPosition : baseColorOffset;
+  
+  Serial.print("Broadcasting color: ");
+  Serial.println(syncData.colorOffset);
+  
+  // Send message via ESP-Now
+  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&syncData, sizeof(syncData));
+  
+  if (result == ESP_OK) {
+    Serial.println("Broadcast sent successfully");
+  } else {
+    Serial.println("Error sending broadcast");
+  }
 }
 
 void loop() {
   uint32_t currentMillis = millis();
+  
+  // Check if it's time to sync with other devices
+  uint32_t secondsSinceBoot = (currentMillis - bootTime) / 1000;
+  uint32_t millisInCurrentSecond = (currentMillis - bootTime) % 1000;
+  
+  // Check if we should still be in fast sync mode
+  if (fastSyncMode && currentMillis - lastChangeTime > 30000) {
+    fastSyncMode = false;
+    Serial.println("Exiting fast sync mode");
+  }
+  
+  // Determine sync interval based on mode
+  uint32_t syncInterval = fastSyncMode ? 100 : SYNC_INTERVAL; // 100ms in fast mode, 1000ms in normal mode
+  
+  // If in fast mode, sync frequently
+  if (fastSyncMode) {
+    if (currentMillis - lastSyncTime >= syncInterval && !syncPending) {
+      Serial.print("Fast sync broadcasting at second: ");
+      Serial.print(secondsSinceBoot);
+      Serial.print(".");
+      Serial.println(millisInCurrentSecond);
+      broadcastSync();
+      lastSyncTime = currentMillis;
+    }
+  } 
+  // In normal mode, sync on the second mark for better synchronization
+  else if (millisInCurrentSecond < 100 && currentMillis - lastSyncTime >= syncInterval && !syncPending) {
+    Serial.print("Normal sync broadcasting at second: ");
+    Serial.println(secondsSinceBoot);
+    broadcastSync();
+    lastSyncTime = currentMillis;
+  }
+  
+  // Reset syncPending flag if we've moved to the next opportunity
+  if (syncPending) {
+    if (fastSyncMode && currentMillis - lastSyncTime >= syncInterval) {
+      syncPending = false;
+    } else if (!fastSyncMode && millisInCurrentSecond >= 100) {
+      syncPending = false;
+    }
+  }
 
   // Check buttons if ANO is available
   if (anoAvailable && currentMillis - lastButtonCheck >= 50) {
@@ -146,8 +343,9 @@ void loop() {
     lastPatternChange = currentMillis;
   }
   
-  // Update the base color offset smoothly if needed
-  if (baseColorOffset != targetColorOffset) {
+  // Update the base color offset smoothly if needed, but only for local changes
+  // Skip smooth transitions for synchronized values to maintain perfect color sync
+  if (baseColorOffset != targetColorOffset && !syncPending) {
     // Gradually move towards target (faster when rotating encoder)
     static uint32_t lastColorTransition = 0;
     
@@ -158,39 +356,47 @@ void loop() {
       distance = 256 - distance;
     }
     
-    // Use variable speed based on distance - faster when further from target
-    int transitionDelay = 25; // Much faster than before (was 80ms)
-    
-    if (currentMillis - lastColorTransition >= transitionDelay) {
-      // Step size also varies with distance
-      int stepSize = 1;
-      if (distance > 60) stepSize = 3; // Faster movement when far away
-      else if (distance > 30) stepSize = 2;
+    // For very small distances, just snap to the target value
+    if (distance <= 3) {
+      baseColorOffset = targetColorOffset;
+      Serial.println("Snapping to target color (close enough)");
+    }
+    // Otherwise use smooth transitions for user experience
+    else {
+      // Use variable speed based on distance - faster when further from target
+      int transitionDelay = 25; // Much faster than before (was 80ms)
       
-      // Make the move using shortest path
-      if (baseColorOffset < targetColorOffset) {
-        if (targetColorOffset - baseColorOffset > 128) {
-          // Go backward (shorter)
-          baseColorOffset = (baseColorOffset - stepSize) % 256;
-        } else {
-          // Go forward
-          baseColorOffset = (baseColorOffset + stepSize) % 256;
+      if (currentMillis - lastColorTransition >= transitionDelay) {
+        // Step size also varies with distance
+        int stepSize = 1;
+        if (distance > 60) stepSize = 3; // Faster movement when far away
+        else if (distance > 30) stepSize = 2;
+        
+        // Make the move using shortest path
+        if (baseColorOffset < targetColorOffset) {
+          if (targetColorOffset - baseColorOffset > 128) {
+            // Go backward (shorter)
+            baseColorOffset = (baseColorOffset - stepSize) % 256;
+          } else {
+            // Go forward
+            baseColorOffset = (baseColorOffset + stepSize) % 256;
+          }
+        } else if (baseColorOffset > targetColorOffset) {
+          if (baseColorOffset - targetColorOffset > 128) {
+            // Go forward (shorter)
+            baseColorOffset = (baseColorOffset + stepSize) % 256;
+          } else {
+            // Go backward
+            baseColorOffset = (baseColorOffset - stepSize) % 256;
+          }
         }
-      } else if (baseColorOffset > targetColorOffset) {
-        if (baseColorOffset - targetColorOffset > 128) {
-          // Go forward (shorter)
-          baseColorOffset = (baseColorOffset + stepSize) % 256;
-        } else {
-          // Go backward
-          baseColorOffset = (baseColorOffset - stepSize) % 256;
-        }
+        
+        // Wrap around color wheel
+        if (baseColorOffset >= 256) baseColorOffset = 0;
+        if (baseColorOffset < 0) baseColorOffset += 256;
+        
+        lastColorTransition = currentMillis;
       }
-      
-      // Wrap around color wheel
-      if (baseColorOffset >= 256) baseColorOffset = 0;
-      if (baseColorOffset < 0) baseColorOffset += 256;
-      
-      lastColorTransition = currentMillis;
     }
   }
   
@@ -245,6 +451,8 @@ void updatePattern(uint32_t currentMillis) {
 void checkInputs() {
   if (!anoAvailable)
     return;
+    
+  uint32_t now = millis();
 
   // Read encoder for color control
   int32_t encoderPosition = ano.getEncoderPosition();
@@ -261,9 +469,29 @@ void checkInputs() {
     
     // Set target color offset for smooth transition
     targetColorOffset = colorPosition;
+    // Update base color offset immediately to avoid color sync issues
+    baseColorOffset = colorPosition;
     
     // Set flag to use custom color
     useCustomColor = true;
+    
+    // Force our timestamp to advance so we become the master
+    // But only update once per 500ms to avoid flooding with updates during rapid rotation
+    static uint32_t lastEncoderUpdate = 0;
+    if (now - lastEncoderUpdate > 500) {
+      // Advance our time by 2 seconds
+      uint32_t currentTime = (now - bootTime) / 1000;
+      bootTime = now - ((currentTime + 2) * 1000);
+      lastEncoderUpdate = now;
+      
+      // Enter fast sync mode
+      fastSyncMode = true;
+      lastChangeTime = now;
+      Serial.println("Entering fast sync mode");
+      
+      // Broadcast soon but not immediately (allow for more encoder turns)
+      lastSyncTime = now - 900; // Will broadcast in ~100ms
+    }
   }
 
   // Read buttons with debouncing
@@ -277,13 +505,10 @@ void checkInputs() {
     // Randomize pattern
     currentPattern = random(NUM_PATTERNS);
     
-    // Randomize color (target)
+    // Randomize color - set all color values to the same value
     colorPosition = random(256);
     targetColorOffset = colorPosition;
-    
-    // Save current color as base for smooth transition
-    // (baseColorOffset will gradually move toward targetColorOffset)
-    baseColorOffset = baseColorOffset; // Keep current offset for smooth transition
+    baseColorOffset = colorPosition; // Set directly to the same value to avoid transition
     
     // Enable custom color mode
     useCustomColor = true;
@@ -294,10 +519,10 @@ void checkInputs() {
     
     // Reset animation
     animationStep = 0;
-    lastUpdate = millis();
+    lastUpdate = now;
     
     // Schedule next random eye blink
-    nextBlinkTime = millis() + random(10000, 60000);
+    nextBlinkTime = now + random(10000, 60000);
     isBlinking = false;
     
     Serial.print("Random pattern: ");
@@ -307,7 +532,19 @@ void checkInputs() {
     Serial.print("Random brightness: ");
     Serial.println(brightness);
     
-    lastPatternChange = millis();
+    lastPatternChange = now;
+    
+    // Force our timestamp to advance so we become the master
+    uint32_t currentTime = (now - bootTime) / 1000;
+    bootTime = now - ((currentTime + 2) * 1000);
+    
+    // Enter fast sync mode
+    fastSyncMode = true;
+    lastChangeTime = now;
+    Serial.println("Entering fast sync mode");
+    
+    // Reset sync time to broadcast the change immediately
+    lastSyncTime = 0;
   }
   lastButtons[0] = centerButton;
 
@@ -319,6 +556,18 @@ void checkInputs() {
     strip.setBrightness(brightness);
     Serial.print("Brightness: ");
     Serial.println(brightness);
+    
+    // Force our timestamp to advance so we become the master
+    uint32_t currentTime = (now - bootTime) / 1000;
+    bootTime = now - ((currentTime + 2) * 1000);
+    
+    // Enter fast sync mode
+    fastSyncMode = true;
+    lastChangeTime = now;
+    Serial.println("Entering fast sync mode");
+    
+    // Reset sync time to broadcast the change immediately
+    lastSyncTime = 0;
   }
   lastButtons[1] = upButton;
 
@@ -330,6 +579,18 @@ void checkInputs() {
     strip.setBrightness(brightness);
     Serial.print("Brightness: ");
     Serial.println(brightness);
+    
+    // Force our timestamp to advance so we become the master
+    uint32_t currentTime = (now - bootTime) / 1000;
+    bootTime = now - ((currentTime + 2) * 1000);
+    
+    // Enter fast sync mode
+    fastSyncMode = true;
+    lastChangeTime = now;
+    Serial.println("Entering fast sync mode");
+    
+    // Reset sync time to broadcast the change immediately
+    lastSyncTime = 0;
   }
   lastButtons[2] = downButton;
 
@@ -351,8 +612,9 @@ void checkInputs() {
 }
 
 void changePattern(int direction) {
+  uint32_t now = millis();
   animationStep = 0;
-  lastUpdate = millis();
+  lastUpdate = now;
 
   currentPattern = (currentPattern + NUM_PATTERNS + direction) % NUM_PATTERNS;
   Serial.print("Pattern: ");
@@ -366,11 +628,24 @@ void changePattern(int direction) {
   targetColorOffset = colorPosition;
   
   // Schedule next random eye blink in 10-60 seconds
-  nextBlinkTime = millis() + random(10000, 60000);
+  nextBlinkTime = now + random(10000, 60000);
   isBlinking = false;
   blinkState = 0;
 
-  lastPatternChange = millis();
+  lastPatternChange = now;
+  
+  // Force our timestamp to advance so we become the master
+  // Adjust bootTime to make our timestamp 2 seconds ahead
+  uint32_t currentTime = (now - bootTime) / 1000;
+  bootTime = now - ((currentTime + 2) * 1000);
+  
+  // Enter fast sync mode
+  fastSyncMode = true;
+  lastChangeTime = now;
+  Serial.println("Entering fast sync mode");
+  
+  // Reset sync time to broadcast the change immediately on next loop iteration
+  lastSyncTime = 0;
 }
 
 // Pattern 1: Rainbow cycle across tiki sections
