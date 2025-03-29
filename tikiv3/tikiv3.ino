@@ -19,12 +19,12 @@
 #define RIGHT_EYE_END 35
 
 // ANO Rotary Encoder
-#define ANO_ADDR 0x36
-#define ANO_SWITCH 24 // center switch
-#define ANO_UP 2      // up button
-#define ANO_DOWN 1    // down button
-#define ANO_LEFT 3    // left button
-#define ANO_RIGHT 0   // right button
+#define ANO_ADDR 0x49  // Corrected address per Adafruit docs
+#define ANO_SWITCH 1   // center switch
+#define ANO_UP 2       // up button
+#define ANO_DOWN 4     // down button
+#define ANO_LEFT 3     // left button
+#define ANO_RIGHT 5    // right button
 
 // Define patterns
 #define NUM_PATTERNS 6
@@ -100,8 +100,20 @@ void setup() {
   for (int attempt = 0; attempt < 3; attempt++) {
     delay(100);
     anoAvailable = ano.begin(ANO_ADDR);
-    if (anoAvailable)
-      break;
+    if (anoAvailable) {
+      uint16_t pid = ano.getVersion();
+      Serial.print("Seesaw found Product ID: ");
+      Serial.println(pid, HEX);
+      
+      // Accept the actual product ID (0x4A97) we're seeing
+      if (pid != 0x4A97) {
+        Serial.println("Unknown product ID for seesaw device");
+        anoAvailable = false;
+      } else {
+        Serial.println("Recognized compatible seesaw device");
+        break;
+      }
+    }
     Serial.println("ANO connection attempt failed, retrying...");
   }
 
@@ -120,6 +132,9 @@ void setup() {
 
     // Initialize encoder
     ano.setEncoderPosition(0);
+    
+    // Enable encoder interrupt
+    ano.enableEncoderInterrupt();
 
     Serial.println("ANO controls ready!");
   }
@@ -138,6 +153,19 @@ void loop() {
   if (anoAvailable && currentMillis - lastButtonCheck >= 50) {
     checkInputs();
     lastButtonCheck = currentMillis;
+    
+    // Add periodic button state check to debug (once every 3 seconds)
+    static uint32_t lastButtonDebug = 0;
+    if (currentMillis - lastButtonDebug > 3000) {
+      Serial.println("Button states:");
+      Serial.print("Center: "); Serial.println(ano.digitalRead(ANO_SWITCH) ? "HIGH" : "LOW");
+      Serial.print("Up: "); Serial.println(ano.digitalRead(ANO_UP) ? "HIGH" : "LOW");
+      Serial.print("Down: "); Serial.println(ano.digitalRead(ANO_DOWN) ? "HIGH" : "LOW");
+      Serial.print("Left: "); Serial.println(ano.digitalRead(ANO_LEFT) ? "HIGH" : "LOW");
+      Serial.print("Right: "); Serial.println(ano.digitalRead(ANO_RIGHT) ? "HIGH" : "LOW");
+      Serial.print("Encoder position: "); Serial.println(ano.getEncoderPosition());
+      lastButtonDebug = currentMillis;
+    }
   }
 
   // Auto-cycle patterns if ANO is not available
@@ -213,6 +241,7 @@ void checkInputs() {
   // Center button - next pattern
   bool centerButton = !ano.digitalRead(ANO_SWITCH);
   if (centerButton && !lastButtons[0]) {
+    Serial.println("Center button pressed");
     changePattern(1);
   }
   lastButtons[0] = centerButton;
@@ -220,6 +249,7 @@ void checkInputs() {
   // Up button - increase brightness
   bool upButton = !ano.digitalRead(ANO_UP);
   if (upButton && !lastButtons[1]) {
+    Serial.println("Up button pressed");
     brightness = constrain(brightness + 25, 10, 255);
     strip.setBrightness(brightness);
     Serial.print("Brightness: ");
@@ -230,6 +260,7 @@ void checkInputs() {
   // Down button - decrease brightness
   bool downButton = !ano.digitalRead(ANO_DOWN);
   if (downButton && !lastButtons[2]) {
+    Serial.println("Down button pressed");
     brightness = constrain(brightness - 25, 10, 255);
     strip.setBrightness(brightness);
     Serial.print("Brightness: ");
@@ -240,6 +271,7 @@ void checkInputs() {
   // Left button - previous pattern
   bool leftButton = !ano.digitalRead(ANO_LEFT);
   if (leftButton && !lastButtons[3]) {
+    Serial.println("Left button pressed");
     changePattern(-1);
   }
   lastButtons[3] = leftButton;
@@ -247,6 +279,7 @@ void checkInputs() {
   // Right button - next pattern
   bool rightButton = !ano.digitalRead(ANO_RIGHT);
   if (rightButton && !lastButtons[4]) {
+    Serial.println("Right button pressed");
     changePattern(1);
   }
   lastButtons[4] = rightButton;
