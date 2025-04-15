@@ -5,10 +5,15 @@
 #include <seesaw_neopixel.h>
 #include <esp_now.h>
 #include <WiFi.h>
+#include <driver/rtc_io.h>
 
 // NeoPixel configuration
 #define PIN 15
 #define TOTAL_PIXELS 36
+
+// Deep sleep configuration
+#define INTERRUPT_PIN GPIO_NUM_13  // Connect ANO interrupt to this pin
+#define BUTTON_HOLD_TIME 2000      // 2 seconds to trigger sleep/wake
 
 // Tiki Face Sections
 #define BOTTOM_TEETH_START 0
@@ -73,6 +78,11 @@ uint32_t bootTime = 0;
 uint32_t lastChangeTime = 0; // Track when last change happened
 bool syncPending = false;
 bool fastSyncMode = false; // Track if we're in fast sync mode
+
+// Sleep mode variables
+uint32_t buttonPressStartTime = 0;
+bool buttonLongPressInProgress = false;
+bool wakeFromSleep = false;
 
 // Callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
@@ -151,6 +161,18 @@ void setup() {
   delay(1000); // Give serial a moment to initialize
 
   Serial.println("Starting tiki LED sculpture");
+  
+  // Check wake reason
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
+    Serial.println("Waking from deep sleep via button press");
+    wakeFromSleep = true;
+  } else {
+    Serial.println("Normal boot");
+  }
+  
+  // Configure interrupt pin
+  pinMode(INTERRUPT_PIN, INPUT_PULLUP);
   
   // Set boot time
   bootTime = millis();
@@ -257,6 +279,32 @@ void setup() {
   Serial.println("ESP-Now initialized and ready");
 
   Serial.println("Setup complete - starting animation");
+}
+
+// Function to enter deep sleep mode
+void enterDeepSleep() {
+  Serial.println("Entering deep sleep mode...");
+  
+  // Turn off all LEDs
+  for (int i = 0; i < TOTAL_PIXELS; i++) {
+    strip.setPixelColor(i, 0);
+  }
+  strip.show();
+  
+  // Configure the wake-up pin
+  // We use ext1 wake-up source, which allows you to wake using a pin's state
+  // We'll set it to wake when the pin goes LOW (button pressed)
+  esp_sleep_enable_ext0_wakeup(INTERRUPT_PIN, 0); // 0 = LOW, 1 = HIGH
+  
+  // Remember we were sleeping so we can set the right state on wake
+  // Using RTC memory to store this state across sleep
+  rtc_gpio_pullup_en(INTERRUPT_PIN);  // Enable pullup
+  
+  Serial.println("Going to sleep now");
+  delay(100); // Brief delay to let serial finish
+  
+  // Enter deep sleep
+  esp_deep_sleep_start();
 }
 
 // Function to broadcast the current state to all other tikis
@@ -497,55 +545,88 @@ void checkInputs() {
   // Read buttons with debouncing
   static bool lastButtons[5] = {false, false, false, false, false};
 
-  // Center button - randomize everything
+  // Center button - randomize or sleep/wake
   bool centerButton = !ano.digitalRead(ANO_SWITCH);
-  if (centerButton && !lastButtons[0]) {
-    Serial.println("Center button pressed - randomizing");
+  
+  // Track button hold time for sleep/wake functionality
+  if (centerButton) {
+    // Button is pressed
+    if (!buttonLongPressInProgress) {
+      // Start tracking the long press
+      buttonLongPressInProgress = true;
+      buttonPressStartTime = now;
+      Serial.println("Center button hold started...");
+    }
     
-    // Randomize pattern
-    currentPattern = random(NUM_PATTERNS);
-    
-    // Randomize color - set all color values to the same value
-    colorPosition = random(256);
-    targetColorOffset = colorPosition;
-    baseColorOffset = colorPosition; // Set directly to the same value to avoid transition
-    
-    // Enable custom color mode
-    useCustomColor = true;
-    
-    // Randomize brightness (within reasonable range)
-    brightness = random(50, 200);
-    strip.setBrightness(brightness);
-    
-    // Reset animation
-    animationStep = 0;
-    lastUpdate = now;
-    
-    // Schedule next random eye blink
-    nextBlinkTime = now + random(10000, 60000);
-    isBlinking = false;
-    
-    Serial.print("Random pattern: ");
-    Serial.println(currentPattern);
-    Serial.print("Random color: ");
-    Serial.println(colorPosition);
-    Serial.print("Random brightness: ");
-    Serial.println(brightness);
-    
-    lastPatternChange = now;
-    
-    // Force our timestamp to advance so we become the master
-    uint32_t currentTime = (now - bootTime) / 1000;
-    bootTime = now - ((currentTime + 2) * 1000);
-    
-    // Enter fast sync mode
-    fastSyncMode = true;
-    lastChangeTime = now;
-    Serial.println("Entering fast sync mode");
-    
-    // Reset sync time to broadcast the change immediately
-    lastSyncTime = 0;
+    // Check if we've held long enough for sleep
+    if (buttonLongPressInProgress && (now - buttonPressStartTime >= BUTTON_HOLD_TIME)) {
+      Serial.println("Long press detected!");
+      
+      // Reset tracking variables
+      buttonLongPressInProgress = false;
+      
+      // Enter deep sleep
+      enterDeepSleep();
+      return; // Should never reach here as device will sleep
+    }
   }
+  else if (buttonLongPressInProgress) {
+    // Button was released before long press threshold
+    buttonLongPressInProgress = false;
+    
+    // If this was a short press (not for sleep), use it for randomize
+    if ((now - buttonPressStartTime) < BUTTON_HOLD_TIME) {
+      // Only trigger on press, not release
+      if (!lastButtons[0]) {
+        Serial.println("Center button pressed - randomizing");
+        
+        // Randomize pattern
+        currentPattern = random(NUM_PATTERNS);
+        
+        // Randomize color - set all color values to the same value
+        colorPosition = random(256);
+        targetColorOffset = colorPosition;
+        baseColorOffset = colorPosition; // Set directly to the same value to avoid transition
+        
+        // Enable custom color mode
+        useCustomColor = true;
+        
+        // Randomize brightness (within reasonable range)
+        brightness = random(50, 200);
+        strip.setBrightness(brightness);
+        
+        // Reset animation
+        animationStep = 0;
+        lastUpdate = now;
+        
+        // Schedule next random eye blink
+        nextBlinkTime = now + random(10000, 60000);
+        isBlinking = false;
+        
+        Serial.print("Random pattern: ");
+        Serial.println(currentPattern);
+        Serial.print("Random color: ");
+        Serial.println(colorPosition);
+        Serial.print("Random brightness: ");
+        Serial.println(brightness);
+        
+        lastPatternChange = now;
+        
+        // Force our timestamp to advance so we become the master
+        uint32_t currentTime = (now - bootTime) / 1000;
+        bootTime = now - ((currentTime + 2) * 1000);
+        
+        // Enter fast sync mode
+        fastSyncMode = true;
+        lastChangeTime = now;
+        Serial.println("Entering fast sync mode");
+        
+        // Reset sync time to broadcast the change immediately
+        lastSyncTime = 0;
+      }
+    }
+  }
+  
   lastButtons[0] = centerButton;
 
   // Up button - increase brightness
