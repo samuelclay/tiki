@@ -56,7 +56,7 @@ Adafruit_seesaw ano = Adafruit_seesaw();
 
 // Global variables
 int currentPattern = 0;
-int brightness = 100; // 0-255
+int brightness = 255; // 0-255 (start at maximum brightness)
 int colorPosition = 0; // 0-255 for color wheel position
 int baseColorOffset = 0; // Starting color offset for the current pattern
 int targetColorOffset = 0; // Target color offset when rotating the encoder
@@ -270,8 +270,11 @@ void setup() {
   Serial.println("ESP-Now initialized and ready");
 
   // Initialize blink timing
-  nextBlinkTime = millis() + random(2000, 10000); // 2-10 seconds for first blink
+  nextBlinkTime = millis() + random(2000, 30000); // Every 2-30 seconds
   blinkFadeBrightness_ = 1.0; // Start with eyes fully visible
+  
+  // Initialize with random easing functions
+  selectRandomEasingFunctions();
 
   Serial.println("Setup complete - starting animation");
 }
@@ -665,7 +668,7 @@ void checkInputs() {
       lastUpdate = now;
       
       // Schedule next random eye blink
-      nextBlinkTime = now + random(2000, 10000);
+      nextBlinkTime = now + random(2000, 30000);
       isBlinking = false;
       
       Serial.print("Random pattern: ");
@@ -818,8 +821,8 @@ void changePattern(int direction) {
   baseColorOffset = colorPosition;
   targetColorOffset = colorPosition;
   
-  // Schedule next random eye blink in 2-10 seconds
-  nextBlinkTime = now + random(2000, 10000);
+  // Schedule next random eye blink in 2-30 seconds
+  nextBlinkTime = now + random(2000, 30000);
   isBlinking = false;
   blinkState = 0;
 
@@ -1071,42 +1074,130 @@ void applyCustomColor() {
   useCustomColor = true;
 }
 
-// Quintic ease in function for smooth transitions
-float quinticEaseIn(float progress) {
-  return progress * progress * progress * progress * progress;
+// Various easing functions for different blink effects
+// Quadratic easing functions
+float quadraticEaseIn(float t) {
+  return t * t;
+}
+
+float quadraticEaseOut(float t) {
+  return t * (2.0 - t);
+}
+
+float quadraticEaseInOut(float t) {
+  if (t < 0.5) return 2.0 * t * t;
+  return (-2.0 * t * t) + (4.0 * t) - 1.0;
+}
+
+// Cubic easing functions
+float cubicEaseIn(float t) {
+  return t * t * t;
+}
+
+float cubicEaseOut(float t) {
+  float f = t - 1.0;
+  return f * f * f + 1.0;
+}
+
+float cubicEaseInOut(float t) {
+  if (t < 0.5) return 4.0 * t * t * t;
+  float f = (2.0 * t) - 2.0;
+  return 0.5 * f * f * f + 1.0;
+}
+
+// Quartic easing functions
+float quarticEaseIn(float t) {
+  return t * t * t * t;
+}
+
+float quarticEaseOut(float t) {
+  float f = t - 1.0;
+  return f * f * f * (1.0 - t) + 1.0;
+}
+
+float quarticEaseInOut(float t) {
+  if (t < 0.5) return 8.0 * t * t * t * t;
+  float f = t - 1.0;
+  return -8.0 * f * f * f * f + 1.0;
+}
+
+// Quintic easing functions
+float quinticEaseIn(float t) {
+  return t * t * t * t * t;
+}
+
+float quinticEaseOut(float t) {
+  float f = t - 1.0;
+  return f * f * f * f * f + 1.0;
+}
+
+float quinticEaseInOut(float t) {
+  if (t < 0.5) return 16.0 * t * t * t * t * t;
+  float f = (2.0 * t) - 2.0;
+  return 0.5 * f * f * f * f * f + 1.0;
+}
+
+// Function to select a random easing function
+typedef float (*EasingFunction)(float);
+EasingFunction selectedEaseClose;
+EasingFunction selectedEaseOpen;
+
+// Names for logging purposes
+const char* easingNames[] = {
+  "quadraticEaseIn", "quadraticEaseOut", "quadraticEaseInOut",
+  "cubicEaseIn", "cubicEaseOut", "cubicEaseInOut",
+  "quarticEaseIn", "quarticEaseOut", "quarticEaseInOut",
+  "quinticEaseIn", "quinticEaseOut", "quinticEaseInOut"
+};
+
+// Track which easing functions are selected
+int selectedEaseCloseIndex = 0;
+int selectedEaseOpenIndex = 0;
+
+void selectRandomEasingFunctions() {
+  // Use quarticEaseOut for both opening and closing
+  selectedEaseCloseIndex = 7; // quarticEaseOut is at index 7 in the easingNames array
+  selectedEaseOpenIndex = 7;  // quarticEaseOut is at index 7 in the easingNames array
+  selectedEaseClose = quarticEaseOut;
+  selectedEaseOpen = quarticEaseOut;
+  
+  Serial.println("Using quarticEaseOut for both opening and closing");
 }
 
 // Handle eye blink animations by updating the global blinkFadeBrightness_ value
 void handleEyeBlink(uint32_t currentMillis) {
   switch (blinkState) {
     case 0: // Initialize blink and set up timing
-      // Set up timing for the fade animation (400ms total)
+      // Choose random easing functions for this blink
+      selectRandomEasingFunctions();
+      
+      // Set up timing for 400ms total blink (200ms for closing)
       startBlinkMs_ = currentMillis;
-      endBlinkMs_ = currentMillis + 400; // 400ms for the closing fade
+      endBlinkMs_ = currentMillis + 200; // 200ms for the closing fade
       
       // Already at full brightness, will start fading
       blinkFadeBrightness_ = 1.0;
       blinkState = 1; // Move to the closing phase
       break;
       
-    case 1: // Fading eyes closed with easing
+    case 1: // Fading eyes closed with quartic ease out
       if (currentMillis <= endBlinkMs_) {
         // Calculate progress ratio (0.0 to 1.0)
         float progress = (float)(currentMillis - startBlinkMs_) / (endBlinkMs_ - startBlinkMs_);
         
-        // Apply easing function
-        float easedProgress = quinticEaseIn(progress);
+        // Apply quartic ease out for closing
+        float easedProgress = selectedEaseClose(progress);
         
-        // Update the global brightness factor (1.0 - 0.9*easedProgress)
-        // This gives us a range from 1.0 down to 0.1 (10%)
-        blinkFadeBrightness_ = 1.0 - (0.9 * easedProgress);
+        // Update the global brightness factor (1.0 - 0.8*easedProgress)
+        // This gives us a range from 1.0 down to 0.2 (20%)
+        blinkFadeBrightness_ = 1.0 - (0.8 * easedProgress);
       } else {
-        // Eyes at minimum brightness (10%)
-        blinkFadeBrightness_ = 0.1;
+        // Eyes at minimum brightness (20%)
+        blinkFadeBrightness_ = 0.2;
         
-        // Hold eyes mostly closed for a moment (200ms)
+        // Virtually no hold time (1ms) - immediately start opening
         startBlinkMs_ = currentMillis;
-        endBlinkMs_ = currentMillis + 200;
+        endBlinkMs_ = currentMillis + 1;
         blinkState = 2;
       }
       break;
@@ -1115,29 +1206,29 @@ void handleEyeBlink(uint32_t currentMillis) {
       if (currentMillis >= endBlinkMs_) {
         // Time to start opening
         startBlinkMs_ = currentMillis;
-        endBlinkMs_ = currentMillis + 400; // 400ms for the opening fade
+        endBlinkMs_ = currentMillis + 199; // 199ms for the opening fade (400ms total with 1ms hold)
         blinkState = 3;
       }
       break;
       
-    case 3: // Fading eyes open with easing
+    case 3: // Fading eyes open with quartic ease out
       if (currentMillis <= endBlinkMs_) {
         // Calculate progress ratio (0.0 to 1.0)
         float progress = (float)(currentMillis - startBlinkMs_) / (endBlinkMs_ - startBlinkMs_);
         
-        // Apply easing function
-        float easedProgress = quinticEaseIn(progress);
+        // Apply quartic ease out for opening
+        float easedProgress = selectedEaseOpen(progress);
         
-        // Update the global brightness factor (0.1 + 0.9*easedProgress)
-        // This gives us a range from 0.1 up to 1.0 (10% to 100%)
-        blinkFadeBrightness_ = 0.1 + (0.9 * easedProgress);
+        // Update the global brightness factor (0.2 + 0.8*easedProgress)
+        // This gives us a range from 0.2 up to 1.0 (20% to 100%)
+        blinkFadeBrightness_ = 0.2 + (0.8 * easedProgress);
       } else {
         // Eyes fully open
         blinkFadeBrightness_ = 1.0;
         
         // Reset blink state and schedule next blink
         isBlinking = false;
-        nextBlinkTime = currentMillis + random(2000, 10000); // 2-10 seconds
+        nextBlinkTime = currentMillis + random(2000, 30000); // Every 2-30 seconds
       }
       break;
   }
