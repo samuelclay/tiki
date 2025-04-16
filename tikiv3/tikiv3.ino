@@ -273,8 +273,9 @@ void setup() {
   nextBlinkTime = millis() + random(2000, 30000); // Every 2-30 seconds
   blinkFadeBrightness_ = 1.0; // Start with eyes fully visible
   
-  // Initialize with random easing functions
-  selectRandomEasingFunctions();
+  // Make sure blink state is initialized correctly
+  blinkState = 0;
+  isBlinking = false;
 
   Serial.println("Setup complete - starting animation");
 }
@@ -658,11 +659,7 @@ void checkInputs() {
       
       // Enable custom color mode
       useCustomColor = true;
-      
-      // Randomize brightness (within reasonable range)
-      brightness = random(50, 200);
-      strip.setBrightness(brightness);
-      
+     
       // Reset animation
       animationStep = 0;
       lastUpdate = now;
@@ -814,10 +811,11 @@ void changePattern(int direction) {
   Serial.print("Pattern: ");
   Serial.println(currentPattern);
 
-  // Reset custom color flag and color offsets when changing patterns
-  useCustomColor = false;
+  // We should NOT reset the useCustomColor flag
+  // This ensures that if we've set a color with the encoder, it's preserved when changing patterns
   
-  // Reset color positions and targets
+  // Always set color positions and targets to match the current colorPosition
+  // This ensures the pattern uses the same color we've set with the dial
   baseColorOffset = colorPosition;
   targetColorOffset = colorPosition;
   
@@ -1137,101 +1135,104 @@ float quinticEaseInOut(float t) {
   return 0.5 * f * f * f * f * f + 1.0;
 }
 
-// Function to select a random easing function
+// Simplified blinking approach - no dynamic function pointers
 typedef float (*EasingFunction)(float);
-EasingFunction selectedEaseClose;
-EasingFunction selectedEaseOpen;
-
-// Names for logging purposes
-const char* easingNames[] = {
-  "quadraticEaseIn", "quadraticEaseOut", "quadraticEaseInOut",
-  "cubicEaseIn", "cubicEaseOut", "cubicEaseInOut",
-  "quarticEaseIn", "quarticEaseOut", "quarticEaseInOut",
-  "quinticEaseIn", "quinticEaseOut", "quinticEaseInOut"
-};
-
-// Track which easing functions are selected
-int selectedEaseCloseIndex = 0;
-int selectedEaseOpenIndex = 0;
-
-void selectRandomEasingFunctions() {
-  // Use quarticEaseOut for both opening and closing
-  selectedEaseCloseIndex = 7; // quarticEaseOut is at index 7 in the easingNames array
-  selectedEaseOpenIndex = 7;  // quarticEaseOut is at index 7 in the easingNames array
-  selectedEaseClose = quarticEaseOut;
-  selectedEaseOpen = quarticEaseOut;
-  
-  Serial.println("Using quarticEaseOut for both opening and closing");
-}
 
 // Handle eye blink animations by updating the global blinkFadeBrightness_ value
+// Completely rewritten with defensive programming
 void handleEyeBlink(uint32_t currentMillis) {
+  // Ensure times are valid
+  if (endBlinkMs_ < startBlinkMs_) {
+    // Invalid timing - reset and try again
+    startBlinkMs_ = currentMillis;
+    endBlinkMs_ = currentMillis + 200;
+  }
+  
   switch (blinkState) {
     case 0: // Initialize blink and set up timing
-      // Choose random easing functions for this blink
-      selectRandomEasingFunctions();
-      
-      // Set up timing for 400ms total blink (200ms for closing)
+      // Set up timing for blink
       startBlinkMs_ = currentMillis;
       endBlinkMs_ = currentMillis + 200; // 200ms for the closing fade
       
-      // Already at full brightness, will start fading
-      blinkFadeBrightness_ = 1.0;
+      // Start at full brightness
+      blinkFadeBrightness_ = 1.0f;
       blinkState = 1; // Move to the closing phase
       break;
       
-    case 1: // Fading eyes closed with quartic ease out
-      if (currentMillis <= endBlinkMs_) {
-        // Calculate progress ratio (0.0 to 1.0)
-        float progress = (float)(currentMillis - startBlinkMs_) / (endBlinkMs_ - startBlinkMs_);
+    case 1: // Fading eyes closed with simple linear interpolation
+      if (currentMillis < endBlinkMs_) {
+        // Make sure we don't divide by zero
+        uint32_t blinkDuration = endBlinkMs_ - startBlinkMs_;
+        if (blinkDuration == 0) blinkDuration = 1; // Prevent division by zero
         
-        // Apply quartic ease out for closing
-        float easedProgress = selectedEaseClose(progress);
+        // Calculate progress ratio with bounds checking (0.0 to 1.0)
+        uint32_t elapsed = (currentMillis > startBlinkMs_) ? currentMillis - startBlinkMs_ : 0;
+        float progress = (float)elapsed / blinkDuration;
         
-        // Update the global brightness factor (1.0 - 0.8*easedProgress)
-        // This gives us a range from 1.0 down to 0.2 (20%)
-        blinkFadeBrightness_ = 1.0 - (0.8 * easedProgress);
+        // Clamp progress to valid range
+        if (progress < 0.0f) progress = 0.0f;
+        if (progress > 1.0f) progress = 1.0f;
+        
+        // Simple linear fade down - most reliable approach
+        blinkFadeBrightness_ = 1.0f - (0.8f * progress);
       } else {
         // Eyes at minimum brightness (20%)
-        blinkFadeBrightness_ = 0.2;
+        blinkFadeBrightness_ = 0.2f;
         
-        // Virtually no hold time (1ms) - immediately start opening
+        // Small hold time - immediately start opening
         startBlinkMs_ = currentMillis;
-        endBlinkMs_ = currentMillis + 1;
+        endBlinkMs_ = currentMillis + 10; // 10ms hold time
         blinkState = 2;
       }
       break;
       
-    case 2: // Hold eyes mostly closed briefly
+    case 2: // Hold eyes mostly closed briefly 
       if (currentMillis >= endBlinkMs_) {
         // Time to start opening
         startBlinkMs_ = currentMillis;
-        endBlinkMs_ = currentMillis + 199; // 199ms for the opening fade (400ms total with 1ms hold)
+        endBlinkMs_ = currentMillis + 200; // 200ms for the opening fade
         blinkState = 3;
       }
       break;
       
-    case 3: // Fading eyes open with quartic ease out
-      if (currentMillis <= endBlinkMs_) {
-        // Calculate progress ratio (0.0 to 1.0)
-        float progress = (float)(currentMillis - startBlinkMs_) / (endBlinkMs_ - startBlinkMs_);
+    case 3: // Fading eyes open with simple linear interpolation
+      if (currentMillis < endBlinkMs_) {
+        // Make sure we don't divide by zero
+        uint32_t blinkDuration = endBlinkMs_ - startBlinkMs_;
+        if (blinkDuration == 0) blinkDuration = 1; // Prevent division by zero
         
-        // Apply quartic ease out for opening
-        float easedProgress = selectedEaseOpen(progress);
+        // Calculate progress with bounds checking
+        uint32_t elapsed = (currentMillis > startBlinkMs_) ? currentMillis - startBlinkMs_ : 0;
+        float progress = (float)elapsed / blinkDuration;
         
-        // Update the global brightness factor (0.2 + 0.8*easedProgress)
-        // This gives us a range from 0.2 up to 1.0 (20% to 100%)
-        blinkFadeBrightness_ = 0.2 + (0.8 * easedProgress);
+        // Clamp progress to valid range
+        if (progress < 0.0f) progress = 0.0f;
+        if (progress > 1.0f) progress = 1.0f;
+        
+        // Simple linear fade up - most reliable approach
+        blinkFadeBrightness_ = 0.2f + (0.8f * progress);
       } else {
-        // Eyes fully open
-        blinkFadeBrightness_ = 1.0;
+        // Eyes fully open - safely complete the blink cycle
+        blinkFadeBrightness_ = 1.0f;
         
         // Reset blink state and schedule next blink
         isBlinking = false;
         nextBlinkTime = currentMillis + random(2000, 30000); // Every 2-30 seconds
       }
       break;
+      
+    default:
+      // Defensive code for invalid state
+      blinkState = 0;
+      blinkFadeBrightness_ = 1.0f;
+      isBlinking = false;
+      nextBlinkTime = currentMillis + random(2000, 30000);
+      break;
   }
+  
+  // Final safety check - make sure we always have a valid brightness value
+  if (blinkFadeBrightness_ < 0.2f) blinkFadeBrightness_ = 0.2f;
+  if (blinkFadeBrightness_ > 1.0f) blinkFadeBrightness_ = 1.0f;
 }
 
 // Gentle rainbow pattern that uses a small color segment
