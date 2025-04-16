@@ -69,6 +69,9 @@ uint32_t lastEyeBlink = 0; // For occasional random eye blinks
 uint32_t nextBlinkTime = 0; // When to do the next blink
 bool isBlinking = false; // Currently in a blink animation
 uint8_t blinkState = 0; // State of the blink animation
+uint32_t startBlinkMs_ = 0; // Start time for the current blink (for easing calculation)
+uint32_t endBlinkMs_ = 0; // End time for the current blink (for easing calculation)
+float blinkFadeBrightness_ = 1.0; // Brightness factor for eye blinks (1.0 = full brightness, 0.0 = off)
 bool anoAvailable = false;
 
 // ESP-Now synchronization variables
@@ -265,6 +268,10 @@ void setup() {
   esp_now_register_recv_cb(OnDataRecv);
   
   Serial.println("ESP-Now initialized and ready");
+
+  // Initialize blink timing
+  nextBlinkTime = millis() + random(2000, 10000); // 2-10 seconds for first blink
+  blinkFadeBrightness_ = 1.0; // Start with eyes fully visible
 
   Serial.println("Setup complete - starting animation");
 }
@@ -658,7 +665,7 @@ void checkInputs() {
       lastUpdate = now;
       
       // Schedule next random eye blink
-      nextBlinkTime = now + random(10000, 60000);
+      nextBlinkTime = now + random(2000, 10000);
       isBlinking = false;
       
       Serial.print("Random pattern: ");
@@ -811,8 +818,8 @@ void changePattern(int direction) {
   baseColorOffset = colorPosition;
   targetColorOffset = colorPosition;
   
-  // Schedule next random eye blink in 10-60 seconds
-  nextBlinkTime = now + random(10000, 60000);
+  // Schedule next random eye blink in 2-10 seconds
+  nextBlinkTime = now + random(2000, 10000);
   isBlinking = false;
   blinkState = 0;
 
@@ -1064,73 +1071,73 @@ void applyCustomColor() {
   useCustomColor = true;
 }
 
-// Handle eye blink animations on top of existing patterns
+// Quintic ease in function for smooth transitions
+float quinticEaseIn(float progress) {
+  return progress * progress * progress * progress * progress;
+}
+
+// Handle eye blink animations by updating the global blinkFadeBrightness_ value
 void handleEyeBlink(uint32_t currentMillis) {
-  static uint32_t lastBlinkUpdate = 0;
-  
-  // Save current eye colors before blinking
-  static uint32_t savedEyeColors[12]; // Enough for both eyes
-  
   switch (blinkState) {
-    case 0: // Initialize blink - save current eye colors
-      for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
-        savedEyeColors[i - LEFT_EYE_START] = strip.getPixelColor(i);
-      }
-      blinkState = 1;
-      lastBlinkUpdate = currentMillis;
+    case 0: // Initialize blink and set up timing
+      // Set up timing for the fade animation (400ms total)
+      startBlinkMs_ = currentMillis;
+      endBlinkMs_ = currentMillis + 400; // 400ms for the closing fade
+      
+      // Already at full brightness, will start fading
+      blinkFadeBrightness_ = 1.0;
+      blinkState = 1; // Move to the closing phase
       break;
       
-    case 1: // Half close eyes - dim to 30%
-      if (currentMillis - lastBlinkUpdate >= 150) { // Slower blink (was 50)
-        for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
-          uint32_t color = savedEyeColors[i - LEFT_EYE_START];
-          uint8_t r = (uint8_t)(((color >> 16) & 0xFF) * 0.3);
-          uint8_t g = (uint8_t)(((color >> 8) & 0xFF) * 0.3);
-          uint8_t b = (uint8_t)((color & 0xFF) * 0.3);
-          strip.setPixelColor(i, strip.Color(r, g, b));
-        }
-        strip.show();
+    case 1: // Fading eyes closed with easing
+      if (currentMillis <= endBlinkMs_) {
+        // Calculate progress ratio (0.0 to 1.0)
+        float progress = (float)(currentMillis - startBlinkMs_) / (endBlinkMs_ - startBlinkMs_);
+        
+        // Apply easing function
+        float easedProgress = quinticEaseIn(progress);
+        
+        // Update the global brightness factor (1.0 - 0.9*easedProgress)
+        // This gives us a range from 1.0 down to 0.1 (10%)
+        blinkFadeBrightness_ = 1.0 - (0.9 * easedProgress);
+      } else {
+        // Eyes at minimum brightness (10%)
+        blinkFadeBrightness_ = 0.1;
+        
+        // Hold eyes mostly closed for a moment (200ms)
+        startBlinkMs_ = currentMillis;
+        endBlinkMs_ = currentMillis + 200;
         blinkState = 2;
-        lastBlinkUpdate = currentMillis;
       }
       break;
       
-    case 2: // Fully close eyes
-      if (currentMillis - lastBlinkUpdate >= 100) { // Slower blink (was 40)
-        for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
-          strip.setPixelColor(i, 0); // Turn off
-        }
-        strip.show();
+    case 2: // Hold eyes mostly closed briefly
+      if (currentMillis >= endBlinkMs_) {
+        // Time to start opening
+        startBlinkMs_ = currentMillis;
+        endBlinkMs_ = currentMillis + 400; // 400ms for the opening fade
         blinkState = 3;
-        lastBlinkUpdate = currentMillis;
       }
       break;
       
-    case 3: // Half open eyes
-      if (currentMillis - lastBlinkUpdate >= 200) { // Slower blink (was 100)
-        for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
-          uint32_t color = savedEyeColors[i - LEFT_EYE_START];
-          uint8_t r = (uint8_t)(((color >> 16) & 0xFF) * 0.3);
-          uint8_t g = (uint8_t)(((color >> 8) & 0xFF) * 0.3);
-          uint8_t b = (uint8_t)((color & 0xFF) * 0.3);
-          strip.setPixelColor(i, strip.Color(r, g, b));
-        }
-        strip.show();
-        blinkState = 4;
-        lastBlinkUpdate = currentMillis;
-      }
-      break;
-      
-    case 4: // Fully open eyes - restore original colors
-      if (currentMillis - lastBlinkUpdate >= 150) { // Slower blink (was 50)
-        for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
-          strip.setPixelColor(i, savedEyeColors[i - LEFT_EYE_START]);
-        }
-        strip.show();
+    case 3: // Fading eyes open with easing
+      if (currentMillis <= endBlinkMs_) {
+        // Calculate progress ratio (0.0 to 1.0)
+        float progress = (float)(currentMillis - startBlinkMs_) / (endBlinkMs_ - startBlinkMs_);
+        
+        // Apply easing function
+        float easedProgress = quinticEaseIn(progress);
+        
+        // Update the global brightness factor (0.1 + 0.9*easedProgress)
+        // This gives us a range from 0.1 up to 1.0 (10% to 100%)
+        blinkFadeBrightness_ = 0.1 + (0.9 * easedProgress);
+      } else {
+        // Eyes fully open
+        blinkFadeBrightness_ = 1.0;
         
         // Reset blink state and schedule next blink
         isBlinking = false;
-        nextBlinkTime = currentMillis + random(10000, 60000); // 10-60 seconds
+        nextBlinkTime = currentMillis + random(2000, 10000); // 2-10 seconds
       }
       break;
   }
@@ -1165,10 +1172,14 @@ void gentleRainbowTikiCustom(uint32_t currentMillis, uint8_t wait) {
     strip.setPixelColor(i, Wheel(colorPos));
   }
 
-  // Eyes - use a complementary color from the base
+  // Eyes - use a complementary color from the base, applying blink brightness factor
   uint32_t eyeColor = Wheel((baseColor + 128) % 256);
   for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
-    strip.setPixelColor(i, eyeColor);
+    // Apply the blink fade brightness to the eye colors
+    uint8_t r = ((eyeColor >> 16) & 0xFF) * blinkFadeBrightness_;
+    uint8_t g = ((eyeColor >> 8) & 0xFF) * blinkFadeBrightness_;
+    uint8_t b = (eyeColor & 0xFF) * blinkFadeBrightness_;
+    strip.setPixelColor(i, strip.Color(r, g, b));
   }
 
   strip.show();
@@ -1201,11 +1212,15 @@ void gradientTeethPattern(uint32_t currentMillis, uint8_t wait) {
     strip.setPixelColor(i, Wheel(colorPos));
   }
   
-  // Eyes pulse gently in complementary color
+  // Eyes pulse gently in complementary color, applying blink brightness factor
   int sinOffset = (int)(sin(j * 0.1) * 20);  // Cast the result to int
   uint32_t eyeColor = Wheel((baseColor + 128 + sinOffset) % 256);
   for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
-    strip.setPixelColor(i, eyeColor);
+    // Apply the blink fade brightness to the eye colors
+    uint8_t r = ((eyeColor >> 16) & 0xFF) * blinkFadeBrightness_;
+    uint8_t g = ((eyeColor >> 8) & 0xFF) * blinkFadeBrightness_;
+    uint8_t b = (eyeColor & 0xFF) * blinkFadeBrightness_;
+    strip.setPixelColor(i, strip.Color(r, g, b));
   }
   
   strip.show();
@@ -1239,11 +1254,13 @@ void colorWavePattern(uint32_t currentMillis, uint8_t wait) {
   // Eyes glow with main color
   uint32_t eyeColor = Wheel(baseColor);
   
-  // Apply a breathing effect to the eyes
+  // Apply a breathing effect to the eyes and also apply blink brightness factor
   float breathFactor = (sin(j * 0.05) * 0.3) + 0.7; // 0.4 to 1.0 range for breathing
-  uint8_t eyeR = (uint8_t)(((eyeColor >> 16) & 0xFF) * breathFactor);
-  uint8_t eyeG = (uint8_t)(((eyeColor >> 8) & 0xFF) * breathFactor);
-  uint8_t eyeB = (uint8_t)((eyeColor & 0xFF) * breathFactor);
+  // Combine the breathing effect with the blink fade
+  float combinedFactor = breathFactor * blinkFadeBrightness_;
+  uint8_t eyeR = (uint8_t)(((eyeColor >> 16) & 0xFF) * combinedFactor);
+  uint8_t eyeG = (uint8_t)(((eyeColor >> 8) & 0xFF) * combinedFactor);
+  uint8_t eyeB = (uint8_t)((eyeColor & 0xFF) * combinedFactor);
   
   for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
     strip.setPixelColor(i, strip.Color(eyeR, eyeG, eyeB));
@@ -1288,14 +1305,15 @@ void fireEyesPatternCustom(uint32_t currentMillis, uint8_t wait) {
     strip.setPixelColor(i, teethColor);
   }
 
-  // Eyes flicker with custom color base
+  // Eyes flicker with custom color base and apply blink brightness
   for (int i = LEFT_EYE_START; i <= RIGHT_EYE_END; i++) {
     uint8_t flicker = random(80, 255);
     
-    // Scale RGB values by flicker factor
-    uint8_t r = (eyeR * flicker) / 255;
-    uint8_t g = (eyeG * flicker) / 255;
-    uint8_t b = (eyeB * flicker) / 255;
+    // Scale RGB values by flicker factor and blink brightness
+    float combinedFactor = (flicker / 255.0) * blinkFadeBrightness_;
+    uint8_t r = eyeR * combinedFactor;
+    uint8_t g = eyeG * combinedFactor;
+    uint8_t b = eyeB * combinedFactor;
     
     strip.setPixelColor(i, strip.Color(r, g, b));
   }
@@ -1530,16 +1548,18 @@ void breathingPatternCustom(uint32_t currentMillis, uint8_t wait) {
   // Apply scaled by breath level
   for (int i = 0; i < TOTAL_PIXELS; i++) {
     if (i >= LEFT_EYE_START && i <= RIGHT_EYE_END) {
-      // Eyes
-      uint8_t scaledR = (eyeR * breathLevel) / 255;
-      uint8_t scaledG = (eyeG * breathLevel) / 255;
-      uint8_t scaledB = (eyeB * breathLevel) / 255;
+      // Eyes - apply both breathing and blinking effects
+      float combinedFactor = (breathLevel / 255.0) * blinkFadeBrightness_;
+      uint8_t scaledR = eyeR * combinedFactor;
+      uint8_t scaledG = eyeG * combinedFactor;
+      uint8_t scaledB = eyeB * combinedFactor;
       strip.setPixelColor(i, strip.Color(scaledR, scaledG, scaledB));
     } else {
-      // Teeth
-      uint8_t scaledR = (teethR * breathLevel) / 255;
-      uint8_t scaledG = (teethG * breathLevel) / 255;
-      uint8_t scaledB = (teethB * breathLevel) / 255;
+      // Teeth - just apply breathing effect
+      float breathFactor = breathLevel / 255.0;
+      uint8_t scaledR = teethR * breathFactor;
+      uint8_t scaledG = teethG * breathFactor;
+      uint8_t scaledB = teethB * breathFactor;
       strip.setPixelColor(i, strip.Color(scaledR, scaledG, scaledB));
     }
   }
