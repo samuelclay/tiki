@@ -11,8 +11,7 @@
 #define PIN 15
 #define TOTAL_PIXELS 36
 
-// Deep sleep configuration
-#define INTERRUPT_PIN GPIO_NUM_13  // Connect ANO interrupt to this pin
+// Sleep mode configuration
 #define BUTTON_HOLD_TIME 2000      // 2 seconds to trigger sleep/wake
 
 // Tiki Face Sections
@@ -82,7 +81,8 @@ bool fastSyncMode = false; // Track if we're in fast sync mode
 // Sleep mode variables
 uint32_t buttonPressStartTime = 0;
 bool buttonLongPressInProgress = false;
-bool wakeFromSleep = false;
+bool inSleepMode = false;
+bool longPressHandled = false; // Track if the long press was already handled
 
 // Callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
@@ -161,18 +161,6 @@ void setup() {
   delay(1000); // Give serial a moment to initialize
 
   Serial.println("Starting tiki LED sculpture");
-  
-  // Check wake reason
-  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-  if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
-    Serial.println("Waking from deep sleep via button press");
-    wakeFromSleep = true;
-  } else {
-    Serial.println("Normal boot");
-  }
-  
-  // Configure interrupt pin
-  pinMode(INTERRUPT_PIN, INPUT_PULLUP);
   
   // Set boot time
   bootTime = millis();
@@ -281,9 +269,10 @@ void setup() {
   Serial.println("Setup complete - starting animation");
 }
 
-// Function to enter deep sleep mode
-void enterDeepSleep() {
-  Serial.println("Entering deep sleep mode...");
+// Function to enter sleep mode (just turn off LEDs)
+void enterSleepMode() {
+  Serial.println("Entering sleep mode...");
+  Serial.println("anoAvailable=" + String(anoAvailable));
   
   // Turn off all LEDs
   for (int i = 0; i < TOTAL_PIXELS; i++) {
@@ -291,20 +280,41 @@ void enterDeepSleep() {
   }
   strip.show();
   
-  // Configure the wake-up pin
-  // We use ext1 wake-up source, which allows you to wake using a pin's state
-  // We'll set it to wake when the pin goes LOW (button pressed)
-  esp_sleep_enable_ext0_wakeup(INTERRUPT_PIN, 0); // 0 = LOW, 1 = HIGH
+  // Set sleep mode flag
+  inSleepMode = true;
   
-  // Remember we were sleeping so we can set the right state on wake
-  // Using RTC memory to store this state across sleep
-  rtc_gpio_pullup_en(INTERRUPT_PIN);  // Enable pullup
+  Serial.println("LEDs turned off, device in sleep mode");
+}
+
+// Function to wake from sleep mode
+void wakeFromSleepMode() {
+  Serial.println("Waking from sleep mode...");
+  Serial.println("anoAvailable=" + String(anoAvailable));
   
-  Serial.println("Going to sleep now");
-  delay(100); // Brief delay to let serial finish
+  // Clear sleep mode flag
+  inSleepMode = false;
   
-  // Enter deep sleep
-  esp_deep_sleep_start();
+  // Reset animation timers
+  lastUpdate = millis();
+  animationStep = 0;
+  
+  // Randomize the pattern on wake (optional - gives visual feedback that device is awake)
+  currentPattern = random(NUM_PATTERNS);
+  
+  // Randomize color for immediate visual feedback
+  colorPosition = random(256);
+  targetColorOffset = colorPosition;
+  baseColorOffset = colorPosition;
+  useCustomColor = true;
+  
+  // Show a quick flash of light to confirm wake
+  for (int i = 0; i < TOTAL_PIXELS; i++) {
+    strip.setPixelColor(i, strip.Color(255, 255, 255));
+  }
+  strip.show();
+  delay(50);
+  
+  Serial.println("Device awake, resuming normal operation");
 }
 
 // Function to broadcast the current state to all other tikis
@@ -334,9 +344,49 @@ void broadcastSync() {
 void loop() {
   uint32_t currentMillis = millis();
   
-  // Check if it's time to sync with other devices
+  // Always check buttons even in sleep mode (to detect wake button press)
+  if (anoAvailable && currentMillis - lastButtonCheck >= 50) {
+    // Debug log button checking (only every 3 seconds to avoid spamming)
+    static uint32_t lastButtonDebug = 0;
+    if (inSleepMode && currentMillis - lastButtonDebug > 3000) {
+      Serial.println("Still checking buttons in sleep mode (anoAvailable=" + 
+                      String(anoAvailable) + ", inSleepMode=" + String(inSleepMode) + ")");
+      lastButtonDebug = currentMillis;
+    }
+    
+    checkInputs();
+    lastButtonCheck = currentMillis;
+  }
+  
+  // Calculate these values regardless of sleep state
   uint32_t secondsSinceBoot = (currentMillis - bootTime) / 1000;
   uint32_t millisInCurrentSecond = (currentMillis - bootTime) % 1000;
+  uint32_t syncInterval = fastSyncMode ? 100 : SYNC_INTERVAL;
+  
+  // If in sleep mode, skip animation and patterns but still process buttons and ESP-Now
+  if (inSleepMode) {
+    // Check if we should still be in fast sync mode
+    if (fastSyncMode && currentMillis - lastChangeTime > 30000) {
+      fastSyncMode = false;
+      Serial.println("Exiting fast sync mode");
+    }
+    
+    // Reset syncPending flag if we've moved to the next opportunity
+    if (syncPending) {
+      if (fastSyncMode && currentMillis - lastSyncTime >= syncInterval) {
+        syncPending = false;
+      } else if (!fastSyncMode && millisInCurrentSecond >= 100) {
+        syncPending = false;
+      }
+    }
+    
+    // Return early - we've processed button inputs and ESP-Now sync flags
+    return;
+  }
+  
+  // Only non-sleeping devices continue here
+  
+  // Check if it's time to sync with other devices
   
   // Check if we should still be in fast sync mode
   if (fastSyncMode && currentMillis - lastChangeTime > 30000) {
@@ -344,8 +394,7 @@ void loop() {
     Serial.println("Exiting fast sync mode");
   }
   
-  // Determine sync interval based on mode
-  uint32_t syncInterval = fastSyncMode ? 100 : SYNC_INTERVAL; // 100ms in fast mode, 1000ms in normal mode
+  // We already calculated syncInterval above
   
   // If in fast mode, sync frequently
   if (fastSyncMode) {
@@ -373,12 +422,6 @@ void loop() {
     } else if (!fastSyncMode && millisInCurrentSecond >= 100) {
       syncPending = false;
     }
-  }
-
-  // Check buttons if ANO is available
-  if (anoAvailable && currentMillis - lastButtonCheck >= 50) {
-    checkInputs();
-    lastButtonCheck = currentMillis;
   }
 
   // Auto-cycle patterns if ANO is not available
@@ -464,6 +507,8 @@ void loop() {
   if (isBlinking && currentPattern != 1) { // Skip during fire eyes
     handleEyeBlink(currentMillis);
   }
+  
+  // End of main loop
 }
 
 void updatePattern(uint32_t currentMillis) {
@@ -497,10 +542,39 @@ void updatePattern(uint32_t currentMillis) {
 }
 
 void checkInputs() {
-  if (!anoAvailable)
+  if (!anoAvailable) {
+    Serial.println("ANO not available, skipping input check");
     return;
-    
+  }
+  
   uint32_t now = millis();
+  
+  // If in sleep mode, print debug info about button state
+  if (inSleepMode) {
+    // Only debug every 2 seconds to avoid spamming logs
+    static uint32_t lastDebugTime = 0;
+    if (now - lastDebugTime > 2000) {
+      // Read all button states for debugging
+      bool centerBtn = !ano.digitalRead(ANO_SWITCH);
+      bool upBtn = !ano.digitalRead(ANO_UP);
+      bool downBtn = !ano.digitalRead(ANO_DOWN);
+      bool leftBtn = !ano.digitalRead(ANO_LEFT);
+      bool rightBtn = !ano.digitalRead(ANO_RIGHT);
+      
+      Serial.print("Button states while sleeping - Center:");
+      Serial.print(centerBtn);
+      Serial.print(" Up:");
+      Serial.print(upBtn);
+      Serial.print(" Down:");
+      Serial.print(downBtn);
+      Serial.print(" Left:");
+      Serial.print(leftBtn);
+      Serial.print(" Right:");
+      Serial.println(rightBtn);
+      
+      lastDebugTime = now;
+    }
+  }
 
   // Read encoder for color control
   int32_t encoderPosition = ano.getEncoderPosition();
@@ -548,83 +622,112 @@ void checkInputs() {
   // Center button - randomize or sleep/wake
   bool centerButton = !ano.digitalRead(ANO_SWITCH);
   
+  // Button just pressed (transition from not pressed to pressed)
+  if (centerButton && !lastButtons[0]) {
+    // Start tracking for potential long press for sleep/wake
+    buttonLongPressInProgress = true;
+    buttonPressStartTime = now;
+    Serial.println("Starting sleep/wake timer (inSleepMode=" + String(inSleepMode) + ")");
+    
+    // If in sleep mode, wake up IMMEDIATELY on press, don't wait for release
+    if (inSleepMode) {
+      Serial.println("Center button pressed while sleeping - WAKING UP IMMEDIATELY");
+      wakeFromSleepMode();
+      // Reset long press handling
+      longPressHandled = false;
+    } else {
+      Serial.println("Center button pressed - randomizing immediately");
+      
+      // Randomize pattern
+      currentPattern = random(NUM_PATTERNS);
+      
+      // Randomize color - set all color values to the same value
+      colorPosition = random(256);
+      targetColorOffset = colorPosition;
+      baseColorOffset = colorPosition; // Set directly to the same value to avoid transition
+      
+      // Enable custom color mode
+      useCustomColor = true;
+      
+      // Randomize brightness (within reasonable range)
+      brightness = random(50, 200);
+      strip.setBrightness(brightness);
+      
+      // Reset animation
+      animationStep = 0;
+      lastUpdate = now;
+      
+      // Schedule next random eye blink
+      nextBlinkTime = now + random(10000, 60000);
+      isBlinking = false;
+      
+      Serial.print("Random pattern: ");
+      Serial.println(currentPattern);
+      Serial.print("Random color: ");
+      Serial.println(colorPosition);
+      Serial.print("Random brightness: ");
+      Serial.println(brightness);
+      
+      lastPatternChange = now;
+      
+      // Force our timestamp to advance so we become the master
+      uint32_t currentTime = (now - bootTime) / 1000;
+      bootTime = now - ((currentTime + 2) * 1000);
+      
+      // Enter fast sync mode
+      fastSyncMode = true;
+      lastChangeTime = now;
+      Serial.println("Entering fast sync mode");
+      
+      // Reset sync time to broadcast the change immediately
+      lastSyncTime = 0;
+    }
+  }
+  
   // Track button hold time for sleep/wake functionality
+  // longPressHandled is now a global variable
+  
   if (centerButton) {
-    // Button is pressed
+    // Button pressed - new press or continued hold
     if (!buttonLongPressInProgress) {
-      // Start tracking the long press
+      // This is a new button press (wasn't previously pressed)
       buttonLongPressInProgress = true;
       buttonPressStartTime = now;
-      Serial.println("Center button hold started...");
+      longPressHandled = false; // Reset for new press
+      
+      Serial.println("New button press detected, longPressHandled reset to false");
     }
     
     // Check if we've held long enough for sleep
-    if (buttonLongPressInProgress && (now - buttonPressStartTime >= BUTTON_HOLD_TIME)) {
-      Serial.println("Long press detected!");
+    if (buttonLongPressInProgress && !longPressHandled && (now - buttonPressStartTime >= BUTTON_HOLD_TIME)) {
+      Serial.println("Long press detected! (inSleepMode=" + String(inSleepMode) + 
+                    ", buttonPressStartTime=" + String(buttonPressStartTime) + 
+                    ", now=" + String(now) + 
+                    ", delta=" + String(now - buttonPressStartTime) + ")");
       
-      // Reset tracking variables
-      buttonLongPressInProgress = false;
+      // Mark this long press as handled (so we don't toggle again on release)
+      longPressHandled = true;
       
-      // Enter deep sleep
-      enterDeepSleep();
-      return; // Should never reach here as device will sleep
+      if (inSleepMode) {
+        // If already in sleep mode, wake up
+        wakeFromSleepMode();
+      } else {
+        // Enter sleep mode
+        enterSleepMode();
+      }
     }
   }
   else if (buttonLongPressInProgress) {
-    // Button was released before long press threshold
+    // Button was released
+    Serial.println("Button released after " + String(now - buttonPressStartTime) + 
+                  "ms (longPressHandled=" + String(longPressHandled) + 
+                  ", inSleepMode=" + String(inSleepMode) + ")");
+    
     buttonLongPressInProgress = false;
     
-    // If this was a short press (not for sleep), use it for randomize
-    if ((now - buttonPressStartTime) < BUTTON_HOLD_TIME) {
-      // Only trigger on press, not release
-      if (!lastButtons[0]) {
-        Serial.println("Center button pressed - randomizing");
-        
-        // Randomize pattern
-        currentPattern = random(NUM_PATTERNS);
-        
-        // Randomize color - set all color values to the same value
-        colorPosition = random(256);
-        targetColorOffset = colorPosition;
-        baseColorOffset = colorPosition; // Set directly to the same value to avoid transition
-        
-        // Enable custom color mode
-        useCustomColor = true;
-        
-        // Randomize brightness (within reasonable range)
-        brightness = random(50, 200);
-        strip.setBrightness(brightness);
-        
-        // Reset animation
-        animationStep = 0;
-        lastUpdate = now;
-        
-        // Schedule next random eye blink
-        nextBlinkTime = now + random(10000, 60000);
-        isBlinking = false;
-        
-        Serial.print("Random pattern: ");
-        Serial.println(currentPattern);
-        Serial.print("Random color: ");
-        Serial.println(colorPosition);
-        Serial.print("Random brightness: ");
-        Serial.println(brightness);
-        
-        lastPatternChange = now;
-        
-        // Force our timestamp to advance so we become the master
-        uint32_t currentTime = (now - bootTime) / 1000;
-        bootTime = now - ((currentTime + 2) * 1000);
-        
-        // Enter fast sync mode
-        fastSyncMode = true;
-        lastChangeTime = now;
-        Serial.println("Entering fast sync mode");
-        
-        // Reset sync time to broadcast the change immediately
-        lastSyncTime = 0;
-      }
-    }
+    // Note: We no longer handle wake on release since we do it on press
+    // But reset the flag anyway
+    longPressHandled = false;
   }
   
   lastButtons[0] = centerButton;
