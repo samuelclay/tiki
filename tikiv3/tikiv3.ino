@@ -38,6 +38,7 @@
 // ESP-Now broadcast configuration
 uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // Broadcast to all ESP devices
 #define SYNC_INTERVAL 1000 // Sync every second
+#define ESP_NOW_MAX_RETRIES 3 // Number of retries for ESP-NOW initialization
 
 // Data structure for ESP-Now synchronization
 typedef struct sync_message {
@@ -49,6 +50,9 @@ typedef struct sync_message {
 
 // Create a sync structure for sending and receiving data
 sync_message syncData;
+
+// Flag to track if ESP-NOW is properly initialized
+bool espNowInitialized = false;
 
 seesaw_NeoPixel strip =
     seesaw_NeoPixel(TOTAL_PIXELS, PIN, NEO_GRB + NEO_KHZ800);
@@ -236,38 +240,72 @@ void setup() {
   lastPatternChange = millis();
   lastUpdate = millis();
 
-  // Initialize ESP-Now
+  // Initialize ESP-Now with retry logic
   WiFi.mode(WIFI_STA);
   
   // Get MAC for debugging
   Serial.print("ESP32 MAC Address: ");
   Serial.println(WiFi.macAddress());
 
-  // Initialize ESP-Now
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-Now");
-    return;
+  // Try to initialize ESP-Now with multiple attempts
+  espNowInitialized = false;
+  for (int attempt = 0; attempt < ESP_NOW_MAX_RETRIES; attempt++) {
+    Serial.print("ESP-NOW initialization attempt ");
+    Serial.print(attempt + 1);
+    Serial.print(" of ");
+    Serial.println(ESP_NOW_MAX_RETRIES);
+    
+    // Reset WiFi first
+    WiFi.disconnect();
+    delay(10);
+    WiFi.mode(WIFI_STA);
+    delay(10);
+    
+    // Try to initialize ESP-Now
+    esp_err_t result = esp_now_init();
+    if (result == ESP_OK) {
+      Serial.println("ESP-Now initialized successfully");
+      espNowInitialized = true;
+      
+      // Register the send callback
+      esp_now_register_send_cb(OnDataSent);
+      
+      // Register peer (broadcast address)
+      esp_now_peer_info_t peerInfo;
+      memset(&peerInfo, 0, sizeof(peerInfo)); // Zero out the structure first
+      memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+      peerInfo.channel = 0;  
+      peerInfo.encrypt = false;
+      
+      // Delete any existing peer first
+      esp_now_del_peer(broadcastAddress);
+      
+      // Add peer        
+      if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+        Serial.println("Failed to add peer");
+        espNowInitialized = false;
+      } else {
+        // Register for a callback function that will be called when data is received
+        esp_now_register_recv_cb(OnDataRecv);
+        Serial.println("ESP-Now peer added and callbacks registered");
+        break; // Success - exit retry loop
+      }
+    } else {
+      Serial.print("ESP-Now init failed with error: ");
+      Serial.println(result);
+      
+      // Try de-initializing before retrying
+      esp_now_deinit();
+      delay(200); // Brief pause before retry
+    }
   }
   
-  // Register the send callback
-  esp_now_register_send_cb(OnDataSent);
-  
-  // Register peer (broadcast address)
-  esp_now_peer_info_t peerInfo;
-  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-  peerInfo.channel = 0;  
-  peerInfo.encrypt = false;
-  
-  // Add peer        
-  if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Failed to add peer");
-    return;
+  if (espNowInitialized) {
+    Serial.println("ESP-Now initialized and ready");
+  } else {
+    Serial.println("Failed to initialize ESP-Now after multiple attempts");
+    Serial.println("Will continue without sync capabilities");
   }
-  
-  // Register for a callback function that will be called when data is received
-  esp_now_register_recv_cb(OnDataRecv);
-  
-  Serial.println("ESP-Now initialized and ready");
 
   // Initialize blink timing
   nextBlinkTime = millis() + random(2000, 30000); // Every 2-30 seconds
@@ -330,6 +368,21 @@ void wakeFromSleepMode() {
 
 // Function to broadcast the current state to all other tikis
 void broadcastSync() {
+  // Skip if ESP-NOW was not successfully initialized
+  if (!espNowInitialized) {
+    // Only log this periodically to avoid spam
+    static uint32_t lastLogTime = 0;
+    uint32_t currentMillis = millis();
+    if (currentMillis - lastLogTime > 10000) { // Log every 10 seconds
+      Serial.println("Broadcast skipped - ESP-NOW not initialized");
+      lastLogTime = currentMillis;
+    }
+    return;
+  }
+  
+  // Prepare the data packet
+  memset(&syncData, 0, sizeof(syncData)); // Clear any stale data
+  
   // Calculate seconds since boot
   syncData.timestamp = (millis() - bootTime) / 1000;
   syncData.pattern = currentPattern;
@@ -342,13 +395,48 @@ void broadcastSync() {
   Serial.print("Broadcasting color: ");
   Serial.println(syncData.colorOffset);
   
-  // Send message via ESP-Now
+  // Try to re-initialize ESP-NOW if not working
+  static uint8_t errorCount = 0;
+  
+  // Send message via ESP-Now with retry on failure
   esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&syncData, sizeof(syncData));
   
   if (result == ESP_OK) {
     Serial.println("Broadcast sent successfully");
+    errorCount = 0; // Reset error count on success
   } else {
-    Serial.println("Error sending broadcast");
+    Serial.print("Error sending broadcast: ");
+    Serial.println(result);
+    
+    // Count errors and attempt to reinitialize if persistent
+    errorCount++;
+    if (errorCount >= 5) {
+      Serial.println("Multiple broadcast failures - attempting to reinitialize ESP-NOW");
+      
+      // Try to reinitialize ESP-NOW
+      esp_now_deinit();
+      delay(100);
+      
+      if (esp_now_init() == ESP_OK) {
+        // Re-register callbacks and peer
+        esp_now_register_send_cb(OnDataSent);
+        esp_now_register_recv_cb(OnDataRecv);
+        
+        esp_now_peer_info_t peerInfo;
+        memset(&peerInfo, 0, sizeof(peerInfo));
+        memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+        peerInfo.channel = 0;  
+        peerInfo.encrypt = false;
+        
+        esp_now_del_peer(broadcastAddress);
+        esp_now_add_peer(&peerInfo);
+        
+        Serial.println("ESP-NOW reinitialized");
+        errorCount = 0;
+      } else {
+        Serial.println("ESP-NOW reinitialization failed");
+      }
+    }
   }
 }
 
@@ -383,7 +471,7 @@ void loop() {
     }
     
     // Reset syncPending flag if we've moved to the next opportunity
-    if (syncPending) {
+    if (syncPending && espNowInitialized) {
       if (fastSyncMode && currentMillis - lastSyncTime >= syncInterval) {
         syncPending = false;
       } else if (!fastSyncMode && millisInCurrentSecond >= 100) {
@@ -407,23 +495,31 @@ void loop() {
   
   // We already calculated syncInterval above
   
-  // If in fast mode, sync frequently
-  if (fastSyncMode) {
-    if (currentMillis - lastSyncTime >= syncInterval && !syncPending) {
-      Serial.print("Fast sync broadcasting at second: ");
-      Serial.print(secondsSinceBoot);
-      Serial.print(".");
-      Serial.println(millisInCurrentSecond);
+  // Only try to sync if ESP-NOW is initialized
+  if (espNowInitialized) {
+    // If in fast mode, sync frequently
+    if (fastSyncMode) {
+      if (currentMillis - lastSyncTime >= syncInterval && !syncPending) {
+        Serial.print("Fast sync broadcasting at second: ");
+        Serial.print(secondsSinceBoot);
+        Serial.print(".");
+        Serial.println(millisInCurrentSecond);
+        broadcastSync();
+        lastSyncTime = currentMillis;
+      }
+    } 
+    // In normal mode, sync on the second mark for better synchronization
+    else if (millisInCurrentSecond < 100 && currentMillis - lastSyncTime >= syncInterval && !syncPending) {
+      Serial.print("Normal sync broadcasting at second: ");
+      Serial.println(secondsSinceBoot);
       broadcastSync();
       lastSyncTime = currentMillis;
     }
-  } 
-  // In normal mode, sync on the second mark for better synchronization
-  else if (millisInCurrentSecond < 100 && currentMillis - lastSyncTime >= syncInterval && !syncPending) {
-    Serial.print("Normal sync broadcasting at second: ");
-    Serial.println(secondsSinceBoot);
-    broadcastSync();
-    lastSyncTime = currentMillis;
+  } else {
+    // ESP-NOW not available, still update the sync time to avoid spam
+    if (currentMillis - lastSyncTime >= 10000) { // Only check every 10 seconds
+      lastSyncTime = currentMillis;
+    }
   }
   
   // Reset syncPending flag if we've moved to the next opportunity
