@@ -93,8 +93,11 @@ bool longPressHandled = false; // Track if the long press was already handled
 
 // Callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("Last Packet Send Status: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  // Packet send callback (logging removed for normal operation)
+  // Only log errors
+  if (status != ESP_NOW_SEND_SUCCESS) {
+    Serial.println("ERROR: ESP-NOW packet delivery failed");
+  }
 }
 
 // Callback when data is received
@@ -158,7 +161,7 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     if (stateChanged) {
       lastChangeTime = millis();
       fastSyncMode = true;
-      Serial.println("Entering fast sync mode");
+      // Fast sync mode enabled (logging removed for normal operation)
     }
   }
 }
@@ -307,13 +310,19 @@ void setup() {
     Serial.println("Will continue without sync capabilities");
   }
 
-  // Initialize blink timing
-  nextBlinkTime = millis() + random(2000, 30000); // Every 2-30 seconds
+  // Initialize blink timing with robust values
+  uint32_t currentTime = millis();
+  nextBlinkTime = currentTime + random(5000, 6000); // Longer initial delay for stability
   blinkFadeBrightness_ = 1.0; // Start with eyes fully visible
   
-  // Make sure blink state is initialized correctly
+  // Make sure all blink state variables are initialized correctly
   blinkState = 0;
   isBlinking = false;
+  startBlinkMs_ = currentTime;
+  endBlinkMs_ = currentTime + 300;
+  lastEyeBlink = currentTime;
+  
+  // Blink initialization complete
 
   Serial.println("Setup complete - starting animation");
 }
@@ -344,8 +353,19 @@ void wakeFromSleepMode() {
   inSleepMode = false;
   
   // Reset animation timers
-  lastUpdate = millis();
+  uint32_t now = millis();
+  lastUpdate = now;
   animationStep = 0;
+  
+  // Reset blink state to avoid any issues from sleep mode
+  isBlinking = false;
+  blinkState = 0;
+  blinkFadeBrightness_ = 1.0f;
+  startBlinkMs_ = now;
+  endBlinkMs_ = now + 300;
+  nextBlinkTime = now + random(5000, 6000); // Longer delay after wake
+  
+  Serial.println("Wake from sleep - reset blink state and scheduled next blink");
   
   // Randomize the pattern on wake (optional - gives visual feedback that device is awake)
   currentPattern = random(NUM_PATTERNS);
@@ -392,8 +412,7 @@ void broadcastSync() {
   // This ensures we sync to the target color immediately
   syncData.colorOffset = useCustomColor ? colorPosition : baseColorOffset;
   
-  Serial.print("Broadcasting color: ");
-  Serial.println(syncData.colorOffset);
+  // Color broadcasting (logging removed for normal operation)
   
   // Try to re-initialize ESP-NOW if not working
   static uint8_t errorCount = 0;
@@ -402,7 +421,7 @@ void broadcastSync() {
   esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&syncData, sizeof(syncData));
   
   if (result == ESP_OK) {
-    Serial.println("Broadcast sent successfully");
+    // Success (logging removed for normal operation)
     errorCount = 0; // Reset error count on success
   } else {
     Serial.print("Error sending broadcast: ");
@@ -445,12 +464,14 @@ void loop() {
   
   // Always check buttons even in sleep mode (to detect wake button press)
   if (anoAvailable && currentMillis - lastButtonCheck >= 50) {
-    // Debug log button checking (only every 3 seconds to avoid spamming)
-    static uint32_t lastButtonDebug = 0;
-    if (inSleepMode && currentMillis - lastButtonDebug > 3000) {
-      Serial.println("Still checking buttons in sleep mode (anoAvailable=" + 
-                      String(anoAvailable) + ", inSleepMode=" + String(inSleepMode) + ")");
-      lastButtonDebug = currentMillis;
+    // Only print initial sleep status once
+    static bool sleepStatusPrinted = false;
+    if (inSleepMode && !sleepStatusPrinted) {
+      Serial.println("Device in sleep mode, checking buttons for wake signals");
+      sleepStatusPrinted = true;
+    } else if (!inSleepMode) {
+      // Reset the flag when out of sleep mode
+      sleepStatusPrinted = false;
     }
     
     checkInputs();
@@ -467,7 +488,7 @@ void loop() {
     // Check if we should still be in fast sync mode
     if (fastSyncMode && currentMillis - lastChangeTime > 30000) {
       fastSyncMode = false;
-      Serial.println("Exiting fast sync mode");
+      // Exiting fast sync mode (logging removed for normal operation)
     }
     
     // Reset syncPending flag if we've moved to the next opportunity
@@ -490,7 +511,7 @@ void loop() {
   // Check if we should still be in fast sync mode
   if (fastSyncMode && currentMillis - lastChangeTime > 30000) {
     fastSyncMode = false;
-    Serial.println("Exiting fast sync mode");
+    // Exiting fast sync mode (logging removed for normal operation)
   }
   
   // We already calculated syncInterval above
@@ -500,18 +521,14 @@ void loop() {
     // If in fast mode, sync frequently
     if (fastSyncMode) {
       if (currentMillis - lastSyncTime >= syncInterval && !syncPending) {
-        Serial.print("Fast sync broadcasting at second: ");
-        Serial.print(secondsSinceBoot);
-        Serial.print(".");
-        Serial.println(millisInCurrentSecond);
+        // Fast sync (logging removed for normal operation)
         broadcastSync();
         lastSyncTime = currentMillis;
       }
     } 
     // In normal mode, sync on the second mark for better synchronization
     else if (millisInCurrentSecond < 100 && currentMillis - lastSyncTime >= syncInterval && !syncPending) {
-      Serial.print("Normal sync broadcasting at second: ");
-      Serial.println(secondsSinceBoot);
+      // Normal sync (logging removed for normal operation)
       broadcastSync();
       lastSyncTime = currentMillis;
     }
@@ -598,20 +615,60 @@ void loop() {
     }
   }
   
+  // Safety check to ensure we're in a clean state before starting a new blink
+  static uint32_t lastBlinkCompletionCheck = 0;
+  if (currentMillis - lastBlinkCompletionCheck > 200) { // Check every 200ms
+    lastBlinkCompletionCheck = currentMillis;
+    
+    // If we think we're blinking but the end time is long past, something's wrong
+    if (isBlinking && currentMillis > endBlinkMs_ + 2000) {
+      Serial.println("RECOVERY: Detected stale blink state - forcing reset");
+      isBlinking = false;
+      blinkState = 0;
+      blinkFadeBrightness_ = 1.0f;
+      nextBlinkTime = currentMillis + random(3000, 5000);
+    }
+  }
+  
   // Check if we need to do a random eye blink in smooth patterns
-  if (!isBlinking && currentMillis >= nextBlinkTime && 
-      (currentPattern != 1)) { // Don't blink during fire eyes pattern
-    // Start a blink
+  if (!isBlinking && currentMillis >= nextBlinkTime) { // Allow blinking for all patterns
+    Serial.print("Starting new blink at time: ");
+    Serial.println(currentMillis);
+    
+    // Start a blink with clear state initialization
     isBlinking = true;
     blinkState = 0;
     lastEyeBlink = currentMillis;
+    
+    // Initialize the timing variables to avoid potential stale values
+    startBlinkMs_ = currentMillis;
+    endBlinkMs_ = currentMillis + 300;
+    blinkFadeBrightness_ = 1.0f;
   }
 
-  // Run current pattern
+  // Run current pattern first
   updatePattern(currentMillis);
   
   // Handle eye blinking if needed
-  if (isBlinking && currentPattern != 1) { // Skip during fire eyes
+  // Add safety check to avoid infinite loops or state corruption
+  static uint32_t lastBlinkCheck = 0;
+  
+  // First, check for obviously invalid states that might cause infinite loops
+  if (isBlinking && (blinkState > 3 || startBlinkMs_ > currentMillis + 1000 || 
+                     (endBlinkMs_ < startBlinkMs_) || 
+                     (currentMillis > endBlinkMs_ + 10000))) {
+    Serial.println("ERROR: Invalid blink timing or state detected! Resetting");
+    isBlinking = false;
+    blinkState = 0;
+    blinkFadeBrightness_ = 1.0f;
+    nextBlinkTime = currentMillis + random(6000, 7000); // Longer delay to recover
+    lastBlinkCheck = currentMillis;
+  }
+  // Then check if we need to handle the blink animation normally
+  else if (isBlinking) {
+    // Update the last check time
+    lastBlinkCheck = currentMillis;
+    // Process the blink animation
     handleEyeBlink(currentMillis);
   }
   
@@ -656,30 +713,12 @@ void checkInputs() {
   
   uint32_t now = millis();
   
-  // If in sleep mode, print debug info about button state
+  // If in sleep mode, only log when buttons are actually pressed
   if (inSleepMode) {
-    // Only debug every 2 seconds to avoid spamming logs
-    static uint32_t lastDebugTime = 0;
-    if (now - lastDebugTime > 2000) {
-      // Read all button states for debugging
-      bool centerBtn = !ano.digitalRead(ANO_SWITCH);
-      bool upBtn = !ano.digitalRead(ANO_UP);
-      bool downBtn = !ano.digitalRead(ANO_DOWN);
-      bool leftBtn = !ano.digitalRead(ANO_LEFT);
-      bool rightBtn = !ano.digitalRead(ANO_RIGHT);
-      
-      Serial.print("Button states while sleeping - Center:");
-      Serial.print(centerBtn);
-      Serial.print(" Up:");
-      Serial.print(upBtn);
-      Serial.print(" Down:");
-      Serial.print(downBtn);
-      Serial.print(" Left:");
-      Serial.print(leftBtn);
-      Serial.print(" Right:");
-      Serial.println(rightBtn);
-      
-      lastDebugTime = now;
+    bool centerBtn = !ano.digitalRead(ANO_SWITCH);
+    // Only log when a button is actually pressed
+    if (centerBtn) {
+      Serial.println("Center button pressed while in sleep mode - preparing to wake");
     }
   }
 
@@ -716,7 +755,7 @@ void checkInputs() {
       // Enter fast sync mode
       fastSyncMode = true;
       lastChangeTime = now;
-      Serial.println("Entering fast sync mode");
+      // Fast sync mode enabled (logging removed for normal operation)
       
       // Broadcast soon but not immediately (allow for more encoder turns)
       lastSyncTime = now - 900; // Will broadcast in ~100ms
@@ -760,9 +799,20 @@ void checkInputs() {
       animationStep = 0;
       lastUpdate = now;
       
-      // Schedule next random eye blink
-      nextBlinkTime = now + random(2000, 30000);
+      // Schedule next random eye blink with safe values
+      // Always cancel any in-progress blink
       isBlinking = false;
+      blinkState = 0;
+      blinkFadeBrightness_ = 1.0f;
+      
+      // Set longer delay to avoid immediate blinking after randomization
+      nextBlinkTime = now + random(4000, 5000);
+      
+      // Reset blink timing variables
+      startBlinkMs_ = now;
+      endBlinkMs_ = now + 300;
+      
+      // Random pattern blink reset (logging removed for normal operation)
       
       Serial.print("Random pattern: ");
       Serial.println(currentPattern);
@@ -780,7 +830,7 @@ void checkInputs() {
       // Enter fast sync mode
       fastSyncMode = true;
       lastChangeTime = now;
-      Serial.println("Entering fast sync mode");
+      // Fast sync mode enabled (logging removed for normal operation)
       
       // Reset sync time to broadcast the change immediately
       lastSyncTime = 0;
@@ -915,10 +965,20 @@ void changePattern(int direction) {
   baseColorOffset = colorPosition;
   targetColorOffset = colorPosition;
   
-  // Schedule next random eye blink in 2-30 seconds
-  nextBlinkTime = now + random(2000, 30000);
+  // Schedule next random eye blink with safe values
+  // Always cancel any in-progress blink when changing patterns
   isBlinking = false;
   blinkState = 0;
+  blinkFadeBrightness_ = 1.0f;
+  
+  // Set longer delay to avoid immediate blinking after pattern change
+  nextBlinkTime = now + random(4000, 5000);
+  
+  // Reset blink timing variables
+  startBlinkMs_ = now;
+  endBlinkMs_ = now + 300;
+  
+  Serial.println("Pattern change - reset blink state and scheduled next blink");
 
   lastPatternChange = now;
   
@@ -1237,18 +1297,59 @@ typedef float (*EasingFunction)(float);
 // Handle eye blink animations by updating the global blinkFadeBrightness_ value
 // Completely rewritten with defensive programming
 void handleEyeBlink(uint32_t currentMillis) {
-  // Ensure times are valid
-  if (endBlinkMs_ < startBlinkMs_) {
-    // Invalid timing - reset and try again
+  // Log blink state transitions for monitoring
+  static uint8_t lastBlinkState = 255; // Invalid initial state to force first log
+  
+  // Log when state changes
+  if (lastBlinkState != blinkState) {
+    lastBlinkState = blinkState;
+    
+    // Report blink state changes
+    Serial.print("BLINK: State changed to ");
+    Serial.print(blinkState);
+    Serial.print(", brightness=");
+    Serial.println(blinkFadeBrightness_);
+  }
+
+  // Critical safety check - reset if in invalid state
+  if (blinkState > 3) {
+    Serial.println("ERROR: Invalid blink state detected, resetting!");
+    blinkState = 0;
+    isBlinking = false;
+    blinkFadeBrightness_ = 1.0f;
+    nextBlinkTime = currentMillis + random(3000, 4000); // Delay next blink
+    return; // Exit immediately to prevent further issues
+  }
+  
+  // Ensure times are valid with more robust protection
+  if (endBlinkMs_ < startBlinkMs_ || 
+      endBlinkMs_ - startBlinkMs_ > 1000 || // Sanity check - no blink phase should last more than 1 second
+      startBlinkMs_ > currentMillis + 1000 || // Sanity check - start time shouldn't be far in the future
+      currentMillis > endBlinkMs_ + 5000) { // Sanity check - current time shouldn't be way past end time
+    Serial.println("ERROR: Invalid blink timing detected, resetting!");
+    Serial.print("  startBlinkMs_=");
+    Serial.print(startBlinkMs_);
+    Serial.print(", endBlinkMs_=");
+    Serial.print(endBlinkMs_);
+    Serial.print(", currentMillis=");
+    Serial.println(currentMillis);
+    
+    // Invalid timing - reset all variables
     startBlinkMs_ = currentMillis;
-    endBlinkMs_ = currentMillis + 200;
+    endBlinkMs_ = currentMillis + 300; // Slightly longer for safety
+    blinkState = 0; // Force restart of blink cycle
+    blinkFadeBrightness_ = 1.0f; // Reset brightness to full
+    isBlinking = false; // Cancel the blink entirely
+    nextBlinkTime = currentMillis + random(4000, 5000); // Schedule next blink later
+    return; // Exit function immediately
   }
   
   switch (blinkState) {
     case 0: // Initialize blink and set up timing
+      // State 0 - initialization (logging removed for normal operation)
       // Set up timing for blink
       startBlinkMs_ = currentMillis;
-      endBlinkMs_ = currentMillis + 200; // 200ms for the closing fade
+      endBlinkMs_ = currentMillis + 300; // 300ms for the closing fade (lengthened for reliability)
       
       // Start at full brightness
       blinkFadeBrightness_ = 1.0f;
@@ -1270,23 +1371,25 @@ void handleEyeBlink(uint32_t currentMillis) {
         if (progress > 1.0f) progress = 1.0f;
         
         // Simple linear fade down - most reliable approach
-        blinkFadeBrightness_ = 1.0f - (0.8f * progress);
+        blinkFadeBrightness_ = 1.0f - (0.9f * progress);
       } else {
-        // Eyes at minimum brightness (20%)
-        blinkFadeBrightness_ = 0.2f;
+        // State transition 1->2 (logging removed for normal operation)
+        // Eyes at minimum brightness
+        blinkFadeBrightness_ = 0.1f;
         
-        // Small hold time - immediately start opening
+        // Slightly longer hold time for stability
         startBlinkMs_ = currentMillis;
-        endBlinkMs_ = currentMillis + 10; // 10ms hold time
+        endBlinkMs_ = currentMillis + 50; // 50ms hold time
         blinkState = 2;
       }
       break;
       
     case 2: // Hold eyes mostly closed briefly 
       if (currentMillis >= endBlinkMs_) {
+        // State transition 2->3 (logging removed for normal operation)
         // Time to start opening
         startBlinkMs_ = currentMillis;
-        endBlinkMs_ = currentMillis + 200; // 200ms for the opening fade
+        endBlinkMs_ = currentMillis + 300; // 300ms for the opening fade (lengthened for reliability)
         blinkState = 3;
       }
       break;
@@ -1306,28 +1409,25 @@ void handleEyeBlink(uint32_t currentMillis) {
         if (progress > 1.0f) progress = 1.0f;
         
         // Simple linear fade up - most reliable approach
-        blinkFadeBrightness_ = 0.2f + (0.8f * progress);
+        blinkFadeBrightness_ = 0.1f + (0.9f * progress);
       } else {
+        // Blink complete (logging removed for normal operation)
         // Eyes fully open - safely complete the blink cycle
         blinkFadeBrightness_ = 1.0f;
         
-        // Reset blink state and schedule next blink
+        // Reset all blink state variables fully
+        blinkState = 0;
         isBlinking = false;
-        nextBlinkTime = currentMillis + random(2000, 30000); // Every 2-30 seconds
+        
+        // Use a more stable timing approach for the next blink
+        uint32_t interval = random(3000, 5000);
+        nextBlinkTime = currentMillis + interval;
       }
-      break;
-      
-    default:
-      // Defensive code for invalid state
-      blinkState = 0;
-      blinkFadeBrightness_ = 1.0f;
-      isBlinking = false;
-      nextBlinkTime = currentMillis + random(2000, 30000);
       break;
   }
   
   // Final safety check - make sure we always have a valid brightness value
-  if (blinkFadeBrightness_ < 0.2f) blinkFadeBrightness_ = 0.2f;
+  if (blinkFadeBrightness_ < 0.1f) blinkFadeBrightness_ = 0.1f;
   if (blinkFadeBrightness_ > 1.0f) blinkFadeBrightness_ = 1.0f;
 }
 
@@ -1498,6 +1598,7 @@ void fireEyesPatternCustom(uint32_t currentMillis, uint8_t wait) {
     uint8_t flicker = random(80, 255);
     
     // Scale RGB values by flicker factor and blink brightness
+    // Make sure blink brightness has more effect by applying it more strongly
     float combinedFactor = (flicker / 255.0) * blinkFadeBrightness_;
     uint8_t r = eyeR * combinedFactor;
     uint8_t g = eyeG * combinedFactor;
