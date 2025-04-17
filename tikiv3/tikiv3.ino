@@ -1817,8 +1817,8 @@ void breathingPatternCustom(uint32_t currentMillis, uint8_t wait) {
   // Get seconds since boot with decimal part for smooth animation
   float timeSeconds = (float)(currentMillis - bootTime) / 1000.0;
   
-  // Use a 5-second period for the complete breath cycle
-  float breathCycle = timeSeconds / 5.0;
+  // Use a 4-second period for the complete breath cycle (was 5 seconds)
+  float breathCycle = timeSeconds / 4.0;
   
   // Only keep the fractional part (0-1 range) for repeating cycles
   breathCycle = breathCycle - floor(breathCycle);
@@ -1826,9 +1826,15 @@ void breathingPatternCustom(uint32_t currentMillis, uint8_t wait) {
   // Convert to radians (0-2π)
   float angle = breathCycle * 2.0 * PI;
   
+  // To slightly accelerate the sinusoidal curve in the middle (faster transitions)
+  // Apply a curve transformation by raising sine to an odd power
+  // sin(angle)^3 preserves the sign but makes transitions between peaks steeper
+  float modifiedSine = sin(angle) * sin(angle) * sin(angle);
+  
   // Sine wave oscillates between -1 and 1, we want 5-250
   // (sin+1)/2 gives 0-1 range, then scale to our desired range
-  breathLevel = 5 + (sin(angle) + 1.0) * 122.5;
+  // Using the modifiedSine for a faster middle transition but still smooth ends
+  breathLevel = 5 + (modifiedSine + 1.0) * 122.5;
   
   // Set direction for gradual transitions
   increasing = (sin(angle + 0.1) > sin(angle));
