@@ -1531,7 +1531,7 @@ void gradientTeethPattern(uint32_t currentMillis, uint8_t wait) {
   j = (j + 1) % 256;
 }
 
-// Color wave pattern - sine wave of color through the teeth
+// Color wave pattern - sine wave of color through the teeth (top vs bottom)
 void colorWavePattern(uint32_t currentMillis, uint8_t wait) {
   static uint16_t j = 0;
   
@@ -1542,11 +1542,24 @@ void colorWavePattern(uint32_t currentMillis, uint8_t wait) {
   // Calculate base position based on smoothly transitioning color offset
   int baseColor = useCustomColor ? baseColorOffset : 0;
   
-  // Create a sine wave pattern through the teeth
-  for (int i = BOTTOM_TEETH_START; i <= TOP_TEETH_END; i++) {
+  // Treat top and bottom teeth as separate groups for the wave effect
+  
+  // Bottom teeth wave
+  for (int i = BOTTOM_TEETH_START; i <= BOTTOM_TEETH_END; i++) {
     int pixelPos = i - BOTTOM_TEETH_START;
-    // Create sine wave effect
-    float sinVal = sin((pixelPos / 8.0) + (j / 20.0)) * 0.5 + 0.5;
+    // Create sine wave effect for bottom teeth
+    float sinVal = sin((pixelPos / 4.0) + (j / 20.0)) * 0.5 + 0.5;
+    int colorOffset = sinVal * 60; // 60-degree color shift based on sine wave
+    
+    int colorPos = (baseColor + colorOffset) % 256;
+    strip.setPixelColor(i, Wheel(colorPos));
+  }
+  
+  // Top teeth wave (offset phase from bottom)
+  for (int i = TOP_TEETH_START; i <= TOP_TEETH_END; i++) {
+    int pixelPos = i - TOP_TEETH_START;
+    // Create sine wave effect for top teeth with phase offset
+    float sinVal = sin((pixelPos / 4.0) + (j / 20.0) + PI) * 0.5 + 0.5; // PI offset makes it opposite phase
     int colorOffset = sinVal * 60; // 60-degree color shift based on sine wave
     
     int colorPos = (baseColor + colorOffset) % 256;
