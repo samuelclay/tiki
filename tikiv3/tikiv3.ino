@@ -313,7 +313,7 @@ void setup() {
 
   // Initialize blink timing with robust values
   uint32_t currentTime = millis();
-  nextBlinkTime = currentTime + random(5000, 6000); // Longer initial delay for stability
+  nextBlinkTime = currentTime + random(2000, 10000); // Initial blink delay between 2-10 seconds
   blinkFadeBrightness_ = 1.0; // Start with eyes fully visible
   
   // Make sure all blink state variables are initialized correctly
@@ -364,7 +364,7 @@ void wakeFromSleepMode() {
   blinkFadeBrightness_ = 1.0f;
   startBlinkMs_ = now;
   endBlinkMs_ = now + 300;
-  nextBlinkTime = now + random(5000, 6000); // Longer delay after wake
+  nextBlinkTime = now + random(2000, 10000); // Random delay after wake
   
   Serial.println("Wake from sleep - reset blink state and scheduled next blink");
   
@@ -627,7 +627,7 @@ void loop() {
       isBlinking = false;
       blinkState = 0;
       blinkFadeBrightness_ = 1.0f;
-      nextBlinkTime = currentMillis + random(3000, 5000);
+      nextBlinkTime = currentMillis + random(2000, 10000);
     }
   }
   
@@ -662,7 +662,7 @@ void loop() {
     isBlinking = false;
     blinkState = 0;
     blinkFadeBrightness_ = 1.0f;
-    nextBlinkTime = currentMillis + random(6000, 7000); // Longer delay to recover
+    nextBlinkTime = currentMillis + random(2000, 10000); // Random delay to recover
     lastBlinkCheck = currentMillis;
   }
   // Then check if we need to handle the blink animation normally
@@ -819,8 +819,8 @@ void checkInputs() {
       blinkState = 0;
       blinkFadeBrightness_ = 1.0f;
       
-      // Set longer delay to avoid immediate blinking after randomization
-      nextBlinkTime = now + random(4000, 5000);
+      // Set random delay for next blink after randomization
+      nextBlinkTime = now + random(2000, 10000);
       
       // Reset blink timing variables
       startBlinkMs_ = now;
@@ -985,8 +985,8 @@ void changePattern(int direction) {
   blinkState = 0;
   blinkFadeBrightness_ = 1.0f;
   
-  // Set longer delay to avoid immediate blinking after pattern change
-  nextBlinkTime = now + random(4000, 5000);
+  // Set random delay for next blink after pattern change
+  nextBlinkTime = now + random(2000, 10000);
   
   // Reset blink timing variables
   startBlinkMs_ = now;
@@ -1434,7 +1434,7 @@ void handleEyeBlink(uint32_t currentMillis) {
         isBlinking = false;
         
         // Use a more stable timing approach for the next blink
-        uint32_t interval = random(3000, 5000);
+        uint32_t interval = random(2000, 10000);
         nextBlinkTime = currentMillis + interval;
       }
       break;
@@ -1806,10 +1806,27 @@ void alternatingTeethPatternCustom(uint32_t currentMillis, uint8_t wait) {
 void breathingPatternCustom(uint32_t currentMillis, uint8_t wait) {
   static uint8_t breathLevel = 0;
   static bool increasing = true;
+  static float lastAngle = 0;
+  static uint32_t colorChangeTime = 0;
+  static bool colorJustChanged = false;
   
   if (currentMillis - lastUpdate < wait)
     return;
   lastUpdate = currentMillis;
+
+  // Check if color wheel was recently adjusted
+  static int lastColorPosition = -1;
+  if (lastColorPosition != baseColorOffset) {
+    // Color changed, mark the time when it changed
+    colorChangeTime = currentMillis;
+    colorJustChanged = true;
+    lastColorPosition = baseColorOffset;
+  }
+  
+  // After color change, wait 500ms before allowing full breathing animation again
+  if (colorJustChanged && currentMillis - colorChangeTime > 500) {
+    colorJustChanged = false;
+  }
 
   // Calculate breath level based on a sine wave with a fixed period
   // This ensures all devices with synchronized clocks will have the same breath pattern
@@ -1825,16 +1842,22 @@ void breathingPatternCustom(uint32_t currentMillis, uint8_t wait) {
   
   // Convert to radians (0-2π)
   float angle = breathCycle * 2.0 * PI;
+  lastAngle = angle;
   
   // To slightly accelerate the sinusoidal curve in the middle (faster transitions)
   // Apply a curve transformation by raising sine to an odd power
   // sin(angle)^3 preserves the sign but makes transitions between peaks steeper
   float modifiedSine = sin(angle) * sin(angle) * sin(angle);
   
-  // Sine wave oscillates between -1 and 1, we want 5-250
-  // (sin+1)/2 gives 0-1 range, then scale to our desired range
-  // Using the modifiedSine for a faster middle transition but still smooth ends
-  breathLevel = 5 + (modifiedSine + 1.0) * 122.5;
+  // If color just changed, fix brightness at max to prevent jumpy animation
+  if (colorJustChanged) {
+    breathLevel = 250; // Fixed at maximum brightness during color change
+  } else {
+    // Normal breathing animation
+    // Sine wave oscillates between -1 and 1, we want 5-250
+    // (sin+1)/2 gives 0-1 range, then scale to our desired range
+    breathLevel = 5 + (modifiedSine + 1.0) * 122.5;
+  }
   
   // Set direction for gradual transitions
   increasing = (sin(angle + 0.1) > sin(angle));
