@@ -65,6 +65,7 @@ int colorPosition = 0; // 0-255 for color wheel position
 int baseColorOffset = 0; // Starting color offset for the current pattern
 int targetColorOffset = 0; // Target color offset when rotating the encoder
 bool useCustomColor = false; // Flag to indicate custom color should be used
+bool initialColorSet = false; // Flag to track if we've set an initial random color
 uint32_t lastPatternChange = 0;
 uint32_t lastButtonCheck = 0;
 uint32_t lastUpdate = 0;
@@ -676,15 +677,28 @@ void loop() {
 }
 
 void updatePattern(uint32_t currentMillis) {
+  // Set an initial random color if this is the first time running a pattern
+  if (!initialColorSet) {
+    // Generate a random color and set it as our custom color
+    colorPosition = random(256);
+    baseColorOffset = colorPosition;
+    targetColorOffset = colorPosition;
+    useCustomColor = true;
+    initialColorSet = true;
+    
+    Serial.print("Setting initial random color: ");
+    Serial.println(colorPosition);
+  }
+
   // Update animation based on the current pattern
   switch (currentPattern) {
   case 0:
-    // Gentle rainbow pattern with color subset (slowed down)
-    gentleRainbowTikiCustom(currentMillis, 60); // Was 30, now 60ms
-    break;
-  case 1:
     // Fire eyes with custom color influence
     fireEyesPatternCustom(currentMillis, 50);
+    break;
+  case 1:
+    // Gentle rainbow pattern with color subset (slowed down)
+    gentleRainbowTikiCustom(currentMillis, 60); // Was 30, now 60ms
     break;
   case 2:
     // Smooth breathing with custom colors
@@ -699,8 +713,8 @@ void updatePattern(uint32_t currentMillis) {
     colorWavePattern(currentMillis, 30);
     break;
   default:
-    // Default to gentle rainbow
-    gentleRainbowTikiCustom(currentMillis, 30);
+    // Default to fire eyes
+    fireEyesPatternCustom(currentMillis, 50);
     break;
   }
 }
@@ -1792,25 +1806,32 @@ void alternatingTeethPatternCustom(uint32_t currentMillis, uint8_t wait) {
 void breathingPatternCustom(uint32_t currentMillis, uint8_t wait) {
   static uint8_t breathLevel = 0;
   static bool increasing = true;
-
+  
   if (currentMillis - lastUpdate < wait)
     return;
   lastUpdate = currentMillis;
 
-  // Update breath level
-  if (increasing) {
-    breathLevel += 5;
-    if (breathLevel >= 250) {
-      breathLevel = 250;
-      increasing = false;
-    }
-  } else {
-    breathLevel -= 5;
-    if (breathLevel <= 5) {
-      breathLevel = 5;
-      increasing = true;
-    }
-  }
+  // Calculate breath level based on a sine wave with a fixed period
+  // This ensures all devices with synchronized clocks will have the same breath pattern
+  
+  // Get seconds since boot with decimal part for smooth animation
+  float timeSeconds = (float)(currentMillis - bootTime) / 1000.0;
+  
+  // Use a 5-second period for the complete breath cycle
+  float breathCycle = timeSeconds / 5.0;
+  
+  // Only keep the fractional part (0-1 range) for repeating cycles
+  breathCycle = breathCycle - floor(breathCycle);
+  
+  // Convert to radians (0-2π)
+  float angle = breathCycle * 2.0 * PI;
+  
+  // Sine wave oscillates between -1 and 1, we want 5-250
+  // (sin+1)/2 gives 0-1 range, then scale to our desired range
+  breathLevel = 5 + (sin(angle) + 1.0) * 122.5;
+  
+  // Set direction for gradual transitions
+  increasing = (sin(angle + 0.1) > sin(angle));
 
   // Colors to use
   uint32_t eyeColor, teethColor;
