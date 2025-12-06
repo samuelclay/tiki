@@ -42,10 +42,12 @@ uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // Broadcast 
 
 // Data structure for ESP-Now synchronization
 typedef struct sync_message {
-  uint32_t timestamp;    // Seconds since boot
+  uint32_t timestamp;    // Seconds since boot (for leader election)
+  uint32_t animTime;     // Animation time in ms (for sync)
   uint8_t pattern;       // Current pattern number
   uint8_t brightness;    // Current brightness
   uint8_t colorOffset;   // Current color offset
+  uint8_t customColor;   // Whether custom color is active
 } sync_message;
 
 // Create a sync structure for sending and receiving data
@@ -85,6 +87,8 @@ uint32_t bootTime = 0;
 uint32_t lastChangeTime = 0; // Track when last change happened
 bool syncPending = false;
 bool fastSyncMode = false; // Track if we're in fast sync mode
+int32_t animationOffset = 0; // Offset to maintain animation continuity when bootTime changes
+uint32_t sharedTime = 0; // Synchronized time for animations
 
 // Sleep mode variables
 uint32_t buttonPressStartTime = 0;
@@ -125,7 +129,10 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     // Update our local timestamp to match received one
     // Add a small millisecond offset to account for transmission delay
     bootTime = millis() - (incomingSync->timestamp * 1000 + 50);
-    
+
+    // Sync animation time: adjust our offset so sharedTime matches sender's
+    animationOffset = millis() - bootTime - incomingSync->animTime;
+
     bool stateChanged = false;
     
     // Update pattern
@@ -144,17 +151,17 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
     }
     
     // Update color offset - immediately set both base and target to received value
-    if (colorPosition != incomingSync->colorOffset) {
+    if (colorPosition != incomingSync->colorOffset || useCustomColor != (incomingSync->customColor != 0)) {
       Serial.print("Updating color from ");
       Serial.print(colorPosition);
       Serial.print(" to ");
       Serial.println(incomingSync->colorOffset);
-      
+
       // Set both base and target color to the exact same value to avoid transition
       baseColorOffset = incomingSync->colorOffset;
       targetColorOffset = incomingSync->colorOffset;
       colorPosition = incomingSync->colorOffset;
-      useCustomColor = true;
+      useCustomColor = (incomingSync->customColor != 0);
       stateChanged = true;
     }
     
@@ -387,6 +394,21 @@ void wakeFromSleepMode() {
   Serial.println("Device awake, resuming normal operation");
 }
 
+// Function to advance timestamp while preserving animation phase
+void advanceTimestamp() {
+  uint32_t now = millis();
+  // Save old sharedTime before changing bootTime
+  uint32_t oldSharedTime = now - bootTime - animationOffset;
+
+  // Advance our time by 2 seconds
+  uint32_t currentTime = (now - bootTime) / 1000;
+  bootTime = now - ((currentTime + 2) * 1000);
+
+  // Adjust animationOffset to keep sharedTime continuous
+  uint32_t newRawTime = now - bootTime;
+  animationOffset = newRawTime - oldSharedTime;
+}
+
 // Function to broadcast the current state to all other tikis
 void broadcastSync() {
   // Skip if ESP-NOW was not successfully initialized
@@ -412,7 +434,9 @@ void broadcastSync() {
   // Send the colorPosition/targetOffset rather than baseColorOffset
   // This ensures we sync to the target color immediately
   syncData.colorOffset = useCustomColor ? colorPosition : baseColorOffset;
-  
+  syncData.animTime = sharedTime;
+  syncData.customColor = useCustomColor ? 1 : 0;
+
   // Color broadcasting (logging removed for normal operation)
   
   // Try to re-initialize ESP-NOW if not working
@@ -462,7 +486,10 @@ void broadcastSync() {
 
 void loop() {
   uint32_t currentMillis = millis();
-  
+
+  // Calculate shared time for synchronized animations (with offset for continuity)
+  sharedTime = currentMillis - bootTime - animationOffset;
+
   // Always check buttons even in sleep mode (to detect wake button press)
   if (anoAvailable && currentMillis - lastButtonCheck >= 50) {
     // Only print initial sleep status once
@@ -761,9 +788,7 @@ void checkInputs() {
     // But only update once per 500ms to avoid flooding with updates during rapid rotation
     static uint32_t lastEncoderUpdate = 0;
     if (now - lastEncoderUpdate > 500) {
-      // Advance our time by 2 seconds
-      uint32_t currentTime = (now - bootTime) / 1000;
-      bootTime = now - ((currentTime + 2) * 1000);
+      advanceTimestamp();
       lastEncoderUpdate = now;
       
       // Enter fast sync mode
@@ -836,11 +861,10 @@ void checkInputs() {
       Serial.println(brightness);
       
       lastPatternChange = now;
-      
+
       // Force our timestamp to advance so we become the master
-      uint32_t currentTime = (now - bootTime) / 1000;
-      bootTime = now - ((currentTime + 2) * 1000);
-      
+      advanceTimestamp();
+
       // Enter fast sync mode
       fastSyncMode = true;
       lastChangeTime = now;
@@ -907,16 +931,15 @@ void checkInputs() {
     strip.setBrightness(brightness);
     Serial.print("Brightness: ");
     Serial.println(brightness);
-    
+
     // Force our timestamp to advance so we become the master
-    uint32_t currentTime = (now - bootTime) / 1000;
-    bootTime = now - ((currentTime + 2) * 1000);
-    
+    advanceTimestamp();
+
     // Enter fast sync mode
     fastSyncMode = true;
     lastChangeTime = now;
     Serial.println("Entering fast sync mode");
-    
+
     // Reset sync time to broadcast the change immediately
     lastSyncTime = 0;
   }
@@ -930,16 +953,15 @@ void checkInputs() {
     strip.setBrightness(brightness);
     Serial.print("Brightness: ");
     Serial.println(brightness);
-    
+
     // Force our timestamp to advance so we become the master
-    uint32_t currentTime = (now - bootTime) / 1000;
-    bootTime = now - ((currentTime + 2) * 1000);
-    
+    advanceTimestamp();
+
     // Enter fast sync mode
     fastSyncMode = true;
     lastChangeTime = now;
     Serial.println("Entering fast sync mode");
-    
+
     // Reset sync time to broadcast the change immediately
     lastSyncTime = 0;
   }
@@ -995,12 +1017,10 @@ void changePattern(int direction) {
   Serial.println("Pattern change - reset blink state and scheduled next blink");
 
   lastPatternChange = now;
-  
+
   // Force our timestamp to advance so we become the master
-  // Adjust bootTime to make our timestamp 2 seconds ahead
-  uint32_t currentTime = (now - bootTime) / 1000;
-  bootTime = now - ((currentTime + 2) * 1000);
-  
+  advanceTimestamp();
+
   // Enter fast sync mode
   fastSyncMode = true;
   lastChangeTime = now;
@@ -1447,11 +1467,12 @@ void handleEyeBlink(uint32_t currentMillis) {
 
 // Gentle rainbow pattern that uses a small color segment
 void gentleRainbowTikiCustom(uint32_t currentMillis, uint8_t wait) {
-  static uint16_t j = 0;
-
   if (currentMillis - lastUpdate < wait)
     return;
   lastUpdate = currentMillis;
+
+  // Use sharedTime for synchronized animation across tikis
+  uint16_t j = (sharedTime / 120) % 256;
 
   // Calculate base position based on smoothly transitioning color offset
   int baseColor = useCustomColor ? baseColorOffset : 0;
@@ -1485,23 +1506,16 @@ void gentleRainbowTikiCustom(uint32_t currentMillis, uint8_t wait) {
   }
 
   strip.show();
-
-  // Even slower movement (moving only every other cycle)
-  static int slowCounter = 0;
-  slowCounter++;
-  if (slowCounter >= 2) {
-    j = (j + 1) % 256;
-    slowCounter = 0;
-  }
 }
 
 // Gradient teeth pattern - smooth gradient across all teeth
 void gradientTeethPattern(uint32_t currentMillis, uint8_t wait) {
-  static uint16_t j = 0;
-  
   if (currentMillis - lastUpdate < wait)
     return;
   lastUpdate = currentMillis;
+
+  // Use sharedTime for synchronized animation across tikis
+  uint16_t j = (sharedTime / 40) % 256;
   
   // Calculate base position based on smoothly transitioning color offset
   int baseColor = useCustomColor ? baseColorOffset : 0;
@@ -1526,18 +1540,16 @@ void gradientTeethPattern(uint32_t currentMillis, uint8_t wait) {
   }
   
   strip.show();
-  
-  // Very slow movement
-  j = (j + 1) % 256;
 }
 
 // Color wave pattern - sine wave of color through the teeth (top vs bottom)
 void colorWavePattern(uint32_t currentMillis, uint8_t wait) {
-  static uint16_t j = 0;
-  
   if (currentMillis - lastUpdate < wait)
     return;
   lastUpdate = currentMillis;
+
+  // Use sharedTime for synchronized animation across tikis
+  uint16_t j = (sharedTime / 30) % 256;
   
   // Calculate base position based on smoothly transitioning color offset
   int baseColor = useCustomColor ? baseColorOffset : 0;
@@ -1582,9 +1594,6 @@ void colorWavePattern(uint32_t currentMillis, uint8_t wait) {
   }
   
   strip.show();
-  
-  // Gentle progression
-  j = (j + 1) % 256;
 }
 
 // Fire eyes with custom color influence
@@ -1817,63 +1826,13 @@ void alternatingTeethPatternCustom(uint32_t currentMillis, uint8_t wait) {
 
 // Breathing pattern with custom color
 void breathingPatternCustom(uint32_t currentMillis, uint8_t wait) {
-  static uint8_t breathLevel = 0;
-  static bool increasing = true;
-  static float lastAngle = 0;
-  static uint32_t colorChangeTime = 0;
-  static bool colorJustChanged = false;
-  
   if (currentMillis - lastUpdate < wait)
     return;
   lastUpdate = currentMillis;
 
-  // Check if color wheel was recently adjusted
-  static int lastColorPosition = -1;
-  if (lastColorPosition != baseColorOffset) {
-    // Color changed, mark the time when it changed
-    colorChangeTime = currentMillis;
-    colorJustChanged = true;
-    lastColorPosition = baseColorOffset;
-  }
-  
-  // After color change, wait 500ms before allowing full breathing animation again
-  if (colorJustChanged && currentMillis - colorChangeTime > 500) {
-    colorJustChanged = false;
-  }
-
-  // Calculate breath level based on a sine wave with a fixed period
-  // This ensures all devices with synchronized clocks will have the same breath pattern
-  
-  // Get seconds since boot with decimal part for smooth animation
-  float timeSeconds = (float)(currentMillis - bootTime) / 1000.0;
-  
-  // Use a 4-second period for the complete breath cycle (was 5 seconds)
-  float breathCycle = timeSeconds / 4.0;
-  
-  // Only keep the fractional part (0-1 range) for repeating cycles
-  breathCycle = breathCycle - floor(breathCycle);
-  
-  // Convert to radians (0-2π)
-  float angle = breathCycle * 2.0 * PI;
-  lastAngle = angle;
-  
-  // To slightly accelerate the sinusoidal curve in the middle (faster transitions)
-  // Apply a curve transformation by raising sine to an odd power
-  // sin(angle)^3 preserves the sign but makes transitions between peaks steeper
-  float modifiedSine = sin(angle) * sin(angle) * sin(angle);
-  
-  // If color just changed, fix brightness at max to prevent jumpy animation
-  if (colorJustChanged) {
-    breathLevel = 250; // Fixed at maximum brightness during color change
-  } else {
-    // Normal breathing animation
-    // Sine wave oscillates between -1 and 1, we want 5-250
-    // (sin+1)/2 gives 0-1 range, then scale to our desired range
-    breathLevel = 5 + (modifiedSine + 1.0) * 122.5;
-  }
-  
-  // Set direction for gradual transitions
-  increasing = (sin(angle + 0.1) > sin(angle));
+  // Use sharedTime for synchronized breathing across tikis
+  float breathPhase = (sharedTime % 3000) / 3000.0 * 2.0 * PI;
+  uint8_t breathLevel = (uint8_t)(127.5 + 122.5 * sin(breathPhase));
 
   // Colors to use
   uint32_t eyeColor, teethColor;
