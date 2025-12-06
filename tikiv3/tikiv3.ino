@@ -107,31 +107,42 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 // Callback when data is received
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
+  // Don't process syncs while in sleep mode - sleep is sticky per-device
+  if (inSleepMode) {
+    return;
+  }
+
   sync_message *incomingSync = (sync_message *)incomingData;
-  Serial.print("Received sync: Time=");
-  Serial.print(incomingSync->timestamp);
-  Serial.print(", Pattern=");
-  Serial.print(incomingSync->pattern);
-  Serial.print(", Brightness=");
-  Serial.print(incomingSync->brightness);
-  Serial.print(", ColorOffset=");
-  Serial.println(incomingSync->colorOffset);
-  
+
   // Compare received timestamp with local time
   uint32_t localTimestamp = (millis() - bootTime) / 1000;
-  
+
   // If received timestamp is ahead of ours, adopt their settings
   if (incomingSync->timestamp > localTimestamp) {
-    Serial.println("Adopting received settings (newer timestamp)");
+    // Use a single millis() call for consistency
+    uint32_t now = millis();
+    uint32_t oldSharedTime = sharedTime;
+
     // Set sync flag to true so we won't broadcast immediately
     syncPending = true;
-    
+
     // Update our local timestamp to match received one
     // Add a small millisecond offset to account for transmission delay
-    bootTime = millis() - (incomingSync->timestamp * 1000 + 50);
+    bootTime = now - (incomingSync->timestamp * 1000 + 50);
 
     // Sync animation time: adjust our offset so sharedTime matches sender's
-    animationOffset = millis() - bootTime - incomingSync->animTime;
+    // This ensures: sharedTime = now - bootTime - animationOffset = animTime
+    animationOffset = (int32_t)(now - bootTime) - (int32_t)incomingSync->animTime;
+
+    // Log adoption with animation timing info
+    Serial.print("ADOPT: t=");
+    Serial.print(incomingSync->timestamp);
+    Serial.print(" anim=");
+    Serial.print(incomingSync->animTime);
+    Serial.print(" old=");
+    Serial.print(oldSharedTime);
+    Serial.print(" new=");
+    Serial.println(now - bootTime - animationOffset);
 
     bool stateChanged = false;
     
@@ -660,9 +671,6 @@ void loop() {
   
   // Check if we need to do a random eye blink in smooth patterns
   if (!isBlinking && currentMillis >= nextBlinkTime) { // Allow blinking for all patterns
-    Serial.print("Starting new blink at time: ");
-    Serial.println(currentMillis);
-    
     // Start a blink with clear state initialization
     isBlinking = true;
     blinkState = 0;
@@ -1334,15 +1342,9 @@ void handleEyeBlink(uint32_t currentMillis) {
   // Log blink state transitions for monitoring
   static uint8_t lastBlinkState = 255; // Invalid initial state to force first log
   
-  // Log when state changes
+  // Track state changes
   if (lastBlinkState != blinkState) {
     lastBlinkState = blinkState;
-    
-    // Report blink state changes
-    Serial.print("BLINK: State changed to ");
-    Serial.print(blinkState);
-    Serial.print(", brightness=");
-    Serial.println(blinkFadeBrightness_);
   }
 
   // Critical safety check - reset if in invalid state
